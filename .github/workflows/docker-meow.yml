@@ -1,0 +1,205 @@
+# Builds the meow image (root Dockerfile — a thin wrapper around
+# a meow-rs release binary) for linux/amd64, linux/arm64 and linux/arm/v7 and
+# pushes a combined multi-arch manifest to GHCR.
+#
+# MANUAL ONLY: this workflow never runs on push or tags — dispatch it from
+# the Actions tab (or `gh workflow run docker-meow.yml [-f meow_version=v0.21.2]`).
+#
+# The MEOW_VERSION input picks the packaged meow-rs release, exactly like the
+# MEOW_VERSION build arg of Dockerfile (and .env for local
+# builds): `latest` (default) resolves the newest upstream release at build
+# time through the GitHub API; a tag (e.g. v0.21.2) pins one. The input value
+# (whitespace-trimmed) is also applied as an image tag, so a pinned build is
+# addressable :v0.21.2.
+#
+# Strategy: amd64 and arm64 are built NATIVELY on matching GitHub runners
+# (apt-get is painfully slow under QEMU); arm/v7 has no native GitHub runner,
+# so it is built on an amd64 host with QEMU binfmt emulation — acceptable here
+# because the Dockerfile's fetch stage runs on $BUILDPLATFORM and the runtime
+# stage only installs ca-certificates + tini. Every platform is pushed by
+# digest and attested with actions/attest-build-provenance; a merge job
+# stitches the already-attested digests into one manifest list.
+#
+# Resulting tags:
+#   MEOW_VERSION=latest  -> latest, main, sha-<shortsha>
+#   MEOW_VERSION=v0.21.2 -> v0.21.2, main, sha-<shortsha>
+#
+
+name: Docker meow
+
+on:
+  workflow_dispatch:
+    inputs:
+      meow_version:
+        description: "meow-rs release to package (tag like v0.21.2, or latest)"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      packages: write
+      # Required by actions/attest-build-provenance (OIDC token + writing
+      # the attestation to the registry).
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          # No native armv7 runner exists — QEMU on an amd64 host. Needs
+          # qemu set up before buildx; see the "Set up QEMU" step.
+          - platform: linux/arm/v7
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Prepare
+        env:
+          MEOW_INPUT: ${{ inputs.meow_version }}
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+          echo "MEOW_VERSION=${MEOW_INPUT//[[:space:]]/}" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image name
+        id: image
+        run: |
+          echo "name=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" \
+            >> "$GITHUB_OUTPUT"
+
+      # arm/v7 has no native runner — cross-build under QEMU binfmt. The other
+      # two platforms match their runner's arch and skip this step entirely.
+      - name: Set up QEMU
+        if: matrix.platform == 'linux/arm/v7'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=raw,value=${{ env.MEOW_VERSION }}
+
+      # Push the single-platform image by digest only; tags are attached by
+      # the merge job once both architectures exist.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            MEOW_VERSION=${{ env.MEOW_VERSION }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=meow-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=meow-${{ env.PLATFORM_PAIR }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      # Attest this single-platform image by digest; the merge job only
+      # stitches already-attested digests into the manifest list.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      # GITHUB_ENV does not cross jobs — re-derive the trimmed input for the
+      # tag list (must match the build job's tags exactly).
+      - name: Prepare
+        env:
+          MEOW_INPUT: ${{ inputs.meow_version }}
+        run: |
+          echo "MEOW_VERSION=${MEOW_INPUT//[[:space:]]/}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image name
+        id: image
+        run: |
+          echo "name=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=raw,value=${{ env.MEOW_VERSION }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect \
+            "${{ steps.image.outputs.name }}:${{ steps.meta.outputs.version }}"

@@ -1,0 +1,280 @@
+<!-- TOC -->
+- [meowkrotik — meow-rs на MikroTik](#meowkrotik--meow-rs-на-mikrotik)
+  - [Что это](#что-это)
+  - [Подготовка сети MikroTik](#подготовка-сети-mikrotik)
+  - [Быстрый старт через переменные окружения](#быстрый-старт-через-переменные-окружения)
+    - [Серверы SRV (локальные)](#серверы-srv-локальные)
+    - [Подписки SUB (HTTP)](#подписки-sub-http)
+  - [Установка контейнера](#установка-контейнера)
+  - [Веб-панель](#веб-панель)
+  - [Переменные окружения](#переменные-окружения)
+  - [Шаблоны конфигурации](#шаблоны-конфигурации)
+  - [Сборка образа](#сборка-образа)
+  - [Отличия от mihomo (важно)](#отличия-от-mihomo-важно)
+  - [Диагностика](#диагностика)
+  - [Дополнительная справка](#дополнительная-справка)
+<!-- TOC -->
+
+# meowkrotik — meow-rs на MikroTik
+
+[meow-rs](https://github.com/meow-rs/meow-rs) — Rust-реализация ядра [mihomo](https://wiki.metacubex.one/) (Clash Meta), упакованная для маршрутизаторов MikroTik в том же формате, что и привычный контейнер [wiktorbgu/mihomo-mikrotik](https://hub.docker.com/r/wiktorbgu/mihomo-mikrotik): тот же `entrypoint.sh`, та же модель шаблонов и переменных окружения, те же порты (mixed 1080, панель 9090).
+
+Из этого репозитория собирается образ, публикуемый на GHCR при ручном запуске [workflow](.github/workflows/docker-meow.yml): `ghcr.io/viktor45/meowkrotik` — имя выводится из имени репозитория (теги `latest`/`main`/`<версия meow-rs>`/`sha-<коммит>`).
+
+## Что это
+
+Контейнер предоставляет:
+
+- **Шлюз с mixed-портом 1080** (SOCKS5 + HTTP одновременно) для проксирования клиентов;
+- **REST API и веб-панель на порту 9090** — у meow-rs есть встроенный дашборд, скачивать zashboard/yacd отдельно не обязательно;
+- **DNS-сервер на порту 53** (fake-ip по умолчанию);
+- **TUN-режим** — L3-устройство с userspace-стеком (прозрачный перехват TCP+UDP). Включается переменной `TUN=1` или автоматически, если в ядре нет nftables. Требования: DNS-режим fake-ip (по умолчанию) и root/`CAP_NET_ADMIN` (в RouterOS контейнер и так работает от root). Маршрутизируется только fake-ip-диапазон — трафик по IP-литералам без DNS не перехватывается (см. [docs/tun.md](https://github.com/meow-rs/meow-rs/blob/main/docs/tun.md));
+- **tproxy-прослушиватель** (порт 15123) для прозрачного перехвата трафика LAN — включается автоматически при наличии nftables в ядре роутера (основной режим на MikroTik);
+- Совместимость с CLI mihomo: `-t` (проверка конфига), `-d`/`-f`, `-v`.
+
+Образ мультиархитектурный: `linux/amd64`, `linux/arm64` и `linux/arm/v7` (32-битные ARM-роутеры MikroTik).
+
+## Что где лежит
+
+| Путь | Что это |
+| :--- | :--- |
+| `Dockerfile` | Сборка образа: meow-rs под именем `mihomo`, переменные по умолчанию, alpine + tini + envsubst |
+| `entrypoint.sh` | То, что запускается в контейнере: ставит nftables/iptables, готовит TUN, собирает провайдеров из `SUB*`/`SRV*`, подставляет `$VARIABLE` в шаблон |
+| `default_config.yaml` | Конфиг по умолчанию; копируется в образ и в рабочую папку при старте |
+| `templates/` | Шесть готовых шаблонов (Lite, Full, Mini, Nano, Area, Chain) |
+| `templates/area/`, `templates/chain/` | Шаблоны, которым нужен сопутствующий `.sh`-скрипт |
+| `rules/ai-dev.yaml` | Собственный список доменов ИИ и инструментов разработки, подключается в Full |
+| `TEMPLATES.md` | Каталог шаблонов: сравнение, замеры, переменные, установка |
+| `.github/workflows/` | Ручная публикация образа в GHCR |
+
+## Подготовка сети MikroTik
+
+Создайте мост для контейнеров и veth-интерфейс для meow:
+
+```bash
+/interface/bridge add name=Bridge-Docker port-cost-mode=short
+/ip/address add address=192.168.250.1/24 interface=Bridge-Docker network=192.168.250.0
+/interface/veth add address=192.168.250.3/24 gateway=192.168.250.1 name=MEOW
+/interface/bridge/port add bridge=Bridge-Docker interface=MEOW
+```
+
+Если bridge/veth для других контейнеров уже есть — используйте их, меняя адреса и имена в командах ниже.
+
+## Быстрый старт через переменные окружения
+
+Создайте список переменных и добавьте серверы/подписки:
+
+```bash
+/container envs add list=MEOW key=LOG_LEVEL value="error"
+```
+
+### Серверы SRV (локальные)
+
+Переменные `SRV<n>` принимают **YAML-описание прокси одной строкой** (потоковый YAML, `name/type/server/port` и т.д. — как в секции `proxies:` mihomo). Это отличие от контейнера mihomo, где SRV принимал URI-ссылки (`vless://...`):
+
+```bash
+/container envs add list=MEOW key=SRV1 value="{name: nl-1, type: vless, server: example.com, port: 443, uuid: xxxxxxxx-0000-0000-0000-xxxxxxxxxxxx, tls: true, flow: xtls-rprx-vision, network: ws, udp: true}"
+/container envs add list=MEOW key=SRV2 value="{name: de-1, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: 'pass'}"
+```
+
+Приставка `_TEST` в имени (например `SRV2_TEST`) игнорируется — можно держать «черновые» записи.
+
+### Подписки SUB (HTTP)
+
+Переменные `SUB<n>` задают **URL подписки**. ⚠️ meow-rs понимает только подписки в формате **Clash YAML** (список `proxies:`); URI-списки (`vless://...` построчно) и base64-подписки не поддерживаются. Если ваша панель отдаёт несколько форматов — выбирайте ссылку «Clash»:
+
+```bash
+/container envs add list=MEOW key=SUB1 value="https://example.com/api/v1/client/subscribe?token=...&flag=clash"
+```
+
+Подписки с ограничением по устройствам: к каждому запросу добавляется заголовок `x-hwid` со стабильным идентификатором, генерируемым при первом запуске (файл `.hwid` в рабочей папке).
+
+## Установка контейнера
+
+```bash
+/container add name=meow envlists=MEOW interface=MEOW logging=yes remote-image=ghcr.io/viktor45/meowkrotik:latest root-dir=/usb1/docker/meowkrotik dns=1.1.1.1,8.8.8.8,9.9.9.9
+```
+
+- `name=meow` — имя контейнера; все команды ниже используют его, если выбрать другое — замените везде;
+- `remote-image` — образ из GHCR (подставьте свой, если форкнули репозиторий: workflow публикует его как `ghcr.io/<владелец>/<репозиторий>-meow`, всегда в нижнем регистре);
+- `root-dir` — папка на носителе роутера (USB/встроенная память);
+- `dns` — DNS контейнера, который виден внутри как `/etc/resolv.conf`;
+- `cmd` не задавайте: пустой `cmd` (значение по умолчанию в RouterOS) запускает ядро в рабочем режиме. Аргументы ядра передаются для разовых задач: `cmd="-t"` — проверить конфиг, `cmd="-v"` — версия.
+
+Затем запустите контейнер: `/container start [find name="meow"]` (или Winbox → Container → Start).
+
+Для гибкой настройки смонтируйте рабочую папку — туда же кладутся шаблоны и скрипты:
+
+```bash
+/container mounts add dst=/etc/mihomo name=MEOW_CFG src=/usb1/docker_configs/meowkrotik
+/container set [find name="meow"] mounts=MEOW_CFG
+```
+
+Внутри контейнера `/etc/mihomo` — это рабочая папка (`$WORKDIR`). Из неё ядро читает шаблоны и скрипты и в неё же пишет всё рабочее:
+
+| Путь в контейнере | Что там | Кто пишет |
+| :--- | :--- | :--- |
+| `/etc/mihomo/template/` | файлы шаблонов | вы |
+| `/etc/mihomo/user_sh/` | скрипты шаблона, выполняются при старте | вы |
+| `/etc/mihomo/<имя шаблона>` | готовый конфиг после подстановки `$VARIABLE` | `entrypoint.sh` |
+| `/etc/mihomo/rule-sets/` | скачанные списки правил | ядро |
+| `/etc/mihomo/srv.yaml`, `veth.yaml` | локальные прокси и дополнительные veth | `entrypoint.sh` |
+| `/etc/mihomo/.hwid`, `.ui_url` | идентификатор устройства и последняя ссылка на панель | `entrypoint.sh` |
+
+Готовый конфиг лежит **вне** папки `template`, и на каждом старте перезаписывается. Правку шаблона ядро не подхватывает на лету — после любого изменения нужен перезапуск контейнера.
+
+⚠️ Без единой подписки (`SUB<n>`) и ни одного локального прокси (`SRV<n>`) шаблон не заработает: секция `proxy-providers` останется пустой и ядро откажется принимать конфиг. В логе этому предшествует `WARNING: no SUB*/SRV* variables set`.
+
+## Веб-панель
+
+Откройте `http://192.168.250.3:9090/ui/` (адрес veth из раздела выше). Встроенная панель meow-rs уже включена: переключение прокси в группах SELECTOR/MANUAL, состояние подписок, правила.
+
+При желании поставьте привычную панель (zashboard/yacd). meow-rs **не скачивает** архив панели автоматически (в отличие от mihomo), поэтому распакуйте файлы сами в папку `$WORKDIR/<EXTERNAL_UI_PATH>` (по умолчанию `ui`) — после этого они раздаются по `/ui`. Защитите панель секретом `UI_SECRET`.
+
+⚠️ `entrypoint.sh` удаляет эту папку целиком при **любом** изменении `EXTERNAL_UI_URL`, включая сброс переменной в пустое значение. Прежде чем менять переменную, распакуйте панель заново.
+
+## Переменные окружения
+
+Набор переменных совпадает с контейнером mihomo; ниже — назначение и значения по умолчанию из Dockerfile.
+
+**Серверы и подписки:**
+
+| Переменная                                    | Описание                                                                                                                                                                   |
+| :-------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SRV1`, `SRV2`, ...                           | Локальные прокси: YAML-мэппинг одной строкой `{name: ..., type: ..., server: ..., port: ...}`                                                                              |
+| `SUB1`, `SUB2`, ...                           | URL подписок в формате **Clash YAML** (не URI/base64)                                                                                                                      |
+| `PROVIDER_INTERVAL`                           | Интервал обновления подписок, сек (по умолчанию `3600`)                                                                                                                    |
+| `HEALTH_CHECK_URL` / `_INTERVAL` / `_TIMEOUT` | Проверка живости прокси (`gstatic.com/generate_204` / `300` / `5000`)                                                                                                      |
+| `HEALTH_CHECK_EXPECTED_STATUS`                | Ожидаемый HTTP-статус (`204`)                                                                                                                                              |
+| `DNS_NAMESERVERS`                             | Список DNS-серверов через запятую для резолвера meow-rs, по умолчанию `1.1.1.1,8.8.8.8`. ⚠️ спец-строка `system` (системный DNS) не поддерживается — задавайте серверы явно |
+
+**Контейнер и панель:**
+
+| Переменная                    | По умолчанию          | Описание                                                         |
+| :---------------------------- | :-------------------- | :--------------------------------------------------------------- |
+| `CONFIG`                      | `default_config.yaml` | Имя конфига из папки `template` (например, `stargate-lite.yaml`) |
+| `MIXED_PORT`                  | `1080`                | Порт mixed-прокси (SOCKS5+HTTP)                                  |
+| `UI_PORT`                     | `9090`                | Порт REST API и панели                                           |
+| `UI_SECRET`                   | пусто                 | Секрет API/панели (Bearer)                                       |
+| `EXTERNAL_UI_PATH`            | `ui`                  | Папка статики панели относительно рабочей папки                  |
+| `EXTERNAL_UI_URL`             | пусто                 | Запоминается, но **не скачивается** meow-rs (см. выше)           |
+| `EXTERNAL_CONTROLLER_ADDRESS` | `0.0.0.0`             | Адрес привязки REST API                                          |
+| `LOG_LEVEL`                   | `info`                | `info`, `debug`, `warning`, `error`, `silent`                    |
+
+**Прочее (значения по умолчанию разумные):**
+
+| Переменная                                        | По умолчанию                      | Описание                                                                                                                                                                                                                                                                                               |
+| :------------------------------------------------ | :-------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IPV6` / `IP_VERSION`                             | `true` / `dual`                   | Поддержка IPv6                                                                                                                                                                                                                                                                                         |
+| `TUN`                                             | `0`                               | `1` = включить TUN-вход (L3-устройство + userspace-стек, перехват TCP и UDP). Без nftables в ядре включается сам                                                                                                                                                                                       |
+| `IPTABLES`                                        | `0`                               | `1` = принудительно iptables вместо nftables                                                                                                                                                                                                                                                           |
+| `DNS_ENABLE` / `DNS_LISTEN` / `DNS_ENHANCED_MODE` | `true` / `0.0.0.0:53` / `fake-ip` | Встроенный DNS-резолвер                                                                                                                                                                                                                                                                                |
+| `DNS_FAKE_IP_RANGE` / `DNS_FAKE_IP_TTL`           | `198.18.0.0/15` / `1`             | Диапазон и TTL fake-ip                                                                                                                                                                                                                                                                                 |
+| `TCP_CONCURRENT` / `UNIFIED_DELAY` / `TOLERANCE`  | `true` / `true` / `10`            | Поведение соединений и замеров                                                                                                                                                                                                                                                                         |
+| `FIND_PROCESS_MODE`                               | `off`                             | Поиск процесса для правил (на роутере выключайте)                                                                                                                                                                                                                                                      |
+| `STORE_SELECTED`                                  | `true`                            | Помнить выбранные прокси в группах                                                                                                                                                                                                                                                                     |
+| `LOADBALANCE_STRATEGY`                            | `consistent-hashing`              | Стратегия LOADBALANCE-групп                                                                                                                                                                                                                                                                            |
+| `GATEWAY_<IP>` / `GATEWAY_<IFACE>`                | —                                 | Шлюз для доп. veth-интерфейсов: если контейнеру выдано несколько veth, каждый дополнительный интерфейс публикуется как прокси `type: direct` в провайдере `VETH`, а `GATEWAY_...` задаёт шлюз его маршрутной таблицы (`192_168_1_2` для IP `192.168.1.2`, `eth1`-подобное имя для интерфейса: `-`→`_`) |
+
+> ℹ️ **meow-rs и VETH:** с 0.22.0 прокси `type: direct` понимает `interface-name`, `ip-version` и `routing-mark`, поэтому модель multi-WAN из `entrypoint.sh` работает как задумано. Проверено на 0.22.0; на 0.21.2 и старше эти поля молча игнорировались, и вторые veth уходили в основной интерфейс.
+
+Переменные задаются так (RouterOS создаёт `envs add`; для смены значения — удалите строку и добавьте заново):
+
+```bash
+/container envs add list=MEOW key=MIXED_PORT value=1080
+```
+
+## Шаблоны конфигурации
+
+Контейнер полностью совместим по модели с [wiktorbgu/mihomo-mikrotik](https://hub.docker.com/r/wiktorbgu/mihomo-mikrotik): конфиг-шаблоны кладутся в `template/`, вспомогательные скрипты — в `user_sh/`, переменные `CONFIG` выбирает шаблон.
+
+Если `CONFIG` не задан, контейнер стартует на `default_config.yaml` из образа: mixed-вход, панель, DNS, базовые группы и подписки из `SUB*`/`SRV*`, но без сервисных правил, rule-providers и геоданных. По замеру это 24 КБ на диске и пик 16.8 МБ памяти. Файл лежит в образе по пути `/etc/mihomo/template/default_config.yaml`; `entrypoint.sh` при старте сверяет его с копией в рабочей папке и, если они разошлись, сохраняет вашу версию в `default_config_old.yaml` и подкладывает свежую.
+
+Готовые шаблоны Stargate (Lite/Full/Mini/Nano/Area/Chain) лежат в [TEMPLATES.md](TEMPLATES.md) — там же сравнение, замеры памяти и места, переменные и правила установки. Загрузка шаблона на роутер:
+
+```bash
+/tool fetch url="https://raw.githubusercontent.com/Viktor45/meowkrotik/refs/heads/main/templates/stargate-lite.yaml" dst-path="/usb1/docker_configs/meowkrotik/template/stargate-lite.yaml"
+/container envs add list=MEOW key=CONFIG value="stargate-lite.yaml"
+/container stop [find name="meow"]
+/container start [find name="meow"]
+```
+
+Замеры памяти и места (linux/amd64, meow-rs 0.22.0, одна подписка на 30 прокси, подробности и метод в [TEMPLATES.md](TEMPLATES.md#потребление-ресурсов-измерено)):
+
+| Конфиг                | Пик памяти | Память после старта | Место всего |
+| :-------------------- | ---------: | ------------------: | ----------: |
+| Full (`stargate`)     |   37.9 МБ  |           11.2 МБ   |   24.0 МБ   |
+| Lite                  |   11.3 МБ  |            4.9 МБ   |    168 КБ   |
+| Mini                  |   11.5 МБ  |            8.3 МБ   |    108 КБ   |
+| Nano                  |    8.5 МБ  |            2.1 МБ   |     56 КБ   |
+| Area (3 страны)       |   17.4 МБ  |            7.9 МБ   |    188 КБ   |
+| Chain                 |   17.7 МБ  |            4.1 МБ   |    192 КБ   |
+| `default_config.yaml` |   16.8 МБ  |           11.2 МБ   |     24 КБ   |
+
+Кроме Full все шаблоны занимают меньше 200 КБ. Full раздувают геобазы: 22.9 МБ из 24.0 МБ — это `Country.mmdb`, `GeoLite2-ASN.mmdb` и `geosite.dat`.
+
+⚠️ Перед использованием шаблонов с meow-rs прочитайте раздел [«Отличия от mihomo»](#отличия-от-mihomo-важно): часть возможностей шаблонов в meow-rs работает иначе или не работает вовсе (формат TUN, категории GEOIP/GEOSITE, цепочки через `dialer-proxy`).
+
+## Сборка образа
+
+```bash
+docker build -t meowkrotik .
+```
+
+- `--platform linux/arm/v7` для 32-битных ARM (сборка под эмуляцией QEMU/Binfmt);
+- `--build-arg MEOW_VERSION=v0.22.0` пинит конкретный релиз meow-rs (по умолчанию `latest` резолвит новейший через GitHub API при сборке);
+- В CI: Actions → **Docker meow** → Run workflow (публикация на GHCR, аттестация каждой платформы, потом мультиарх-манифест).
+
+## Отличия от mihomo (важно)
+
+Проверено на **meow-rs v0.22.0** (релиз 2026-10-03) — полный список в [migration-from-go-mihomo.md](https://github.com/meow-rs/meow-rs/blob/main/docs/migration-from-go-mihomo.md). Практические следствия:
+
+| Возможность mihomo                                                                                                                      | Статус в meow-rs 0.22                                                                                                                                                                                                                                                                                                               |
+| :-------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Подписки URI-списком (`vless://...` построчно) и base64                                                                                 | ❌ Только Clash YAML                                                                                                                                                                                                                                                                                                                 |
+| `nameserver: system` в DNS                                                                                                              | ❌ Игнорируется как имя хоста; задавайте серверы явно (`DNS_NAMESERVERS`)                                                                                                                                                                                                                                                            |
+| TUN-инбаунд                                                                                                                             | ✅ Секция верхнего уровня `tun:`, а не listener `type: tun` (такой тип слушателя — жёсткая ошибка). `inet4-address` — строка; `inet6-address` — только с `auto-route: global`. Поля `stack`, `strict-route`, `auto-redirect`, `auto-detect-interface` принимаются с warning и игнорируются. Вход TUN для `IN-NAME` всегда `meow-tun` |
+| tproxy-слушатель с `udp: true`                                                                                                          | ⚠️ Только вместе с `firewall: false` — ядро не ставит правила для UDP TPROXY сам (их ставит entrypoint через nft)                                                                                                                                                                                                                    |
+| `external-ui-url` (автоскачивание панели)                                                                                               | ❌ Не скачивается; встроенный дашборд доступен всегда                                                                                                                                                                                                                                                                                |
+| TUIC / SSH исходящие                                                                                                                     | ❌ Не реализованы                                                                                                                                                                                                                                                                               |
+| `quic://` DNS (DoQ)                                                                                                                     | ❌ Жёсткая ошибка; используйте `tls://`/`https://`                                                                                                                                                                                                                                                                                   |
+| VLESS `flow: xtls-rprx-direct`                                                                                                          | ❌ Только `xtls-rprx-vision`                                                                                                                                                                                                                                                                                                         |
+| GEOIP по нестандартным категориям (ZKEEN: akamai, amazon, …)                                                                            | ❌ Только ISO-коды стран (Country.mmdb); CDN/облака в шаблоне Stargate вынесены в ipcidr rule-providers                                                                                                                                                                                                                              |
+| GEOSITE по нестандартным категориям (ZKEEN: domains/other/politic)                                                                      | ❌ Таких категорий нет в базе MetaCubeX; в шаблоне Stargate заменены доменными списками legiz-ru                                                                                                                                                                                                                                     |
+| `geodata-mode` / `geox-url` / `geo-auto-update`                                                                                         | ⚠️ Игнорируются; используйте секцию `geodata:` (пути, URL, `auto-update`)                                                                                                                                                                                                                                                            |
+| Загрузка геобаз (`Country.mmdb`, `GeoLite2-ASN.mmdb`, `geosite.dat`) | ⚠️ Скачиваются при старте **безусловно**, если файла нет: ни `auto-update`, ни наличие GEOIP/GEOSITE-правил ядро не проверяет. Отключается только указанием в `geodata:` путей к уже существующим файлам (в пяти шаблонах и `default_config.yaml` это `/dev/null`). На Full это 22.9 МБ, остальным шаблонам базы не нужны |
+| Вложенные merge-ключи `<<:` (якорь, ссылающийся на якорь с `<<:`)                                                                       | ❌ Не разворачиваются → `missing field`; все якоря в шаблонах заданы полными                                                                                                                                                                                                                                                         |
+| `RULE-SET` внутри `AND`/`OR`/`NOT`                                                                                                      | ❌ Не парсится; в шаблонах развёрнуто в последовательные правила                                                                                                                                                                                                                                                                     |
+| Спец-прокси `PASS`, `PASS-RULE`, `COMPATIBLE`                                                                                           | ✅ Снова встроены (0.22)                                                                                                                                                                                                                                                                                                             |
+| `header:` у proxy-provider и rule-provider                                                                                              | ✅ Принимаются и список, и скаляр                                                                                                                                                                                                                                                                                                    |
+| `override: dialer-proxy:` / `dialer-proxy:` у proxy-provider                                                                            | ✅ Работает (с 0.22) — на этом построены цепочки шаблона Chain. Внутри `override:` учитывается **только** `dialer-proxy`; `exclude-filter`/`exclude-type` ставьте на уровне провайдера                                                                                                                                               |
+| `direct` с `interface-name` / `ip-version` / `routing-mark`                                                                             | ✅ Поддерживается (с 0.22) — multi-WAN/VETH работает                                                                                                                                                                                                                                                                                 |
+| `interval` у file-провайдера                                                                                                            | ✅ Перечитывание файла по таймеру (health-check у file-провайдеров не планируется — информационный warning)                                                                                                                                                                                                                          |
+| `rule-providers: inline`                                                                                                                | ✅ Без поля `interval` (с ним провайдер не загрузится)                                                                                                                                                                                                                                                                               |
+| `strict: true` (новое в 0.22)                                                                                                           | ✅ Включает строгий разбор конфига; по умолчанию выключен                                                                                                                                                                                                                                                                            |
+| `icon:` / `hidden:` у proxy-групп                                                                                                       | ⚠️ Игнорируются (без ошибки и без warning)                                                                                                                                                                                                                                                                                           |
+| `sniffer.sniff.QUIC`                                                                                                                    | ⚠️ Игнорируется (сниффер поддерживает только TLS и HTTP)                                                                                                                                                                                                                                                                             |
+| Группы `select`/`url-test`/`fallback`/`load-balance`/`relay`, `filter`/`exclude-filter`, `include-all`, `max-failed-times`, `tolerance` | ✅ Работают                                                                                                                                                                                                                                                                                                                          |
+| `SUB-RULE`, `IN-TYPE`, `PROCESS-NAME`, fake-ip, DoH/DoT, REST API, `/metrics`                                                           | ✅ Работают                                                                                                                                                                                                                                                                                                                          |
+| Строгие ошибки вместо молчаливых пропусков (дубликат порта, опечатка в `IN-TYPE`, кривой CIDR)                                          | ⚠️ meow-rs падает на старте с понятным сообщением вместо «тихого» поведения mihomo                                                                                                                                                                                                                                                   |
+
+Проверка конфига перед стартом: `cmd="-t"` в настройках контейнера (RouterOS) или `docker run --rm <образ> -t`.
+
+## Диагностика
+
+1. Включите логирование: `/container set [find name="meow"] logging=yes`, читайте `/log print`.
+2. Конфиг не находится: в логе `ERROR: Config not found! Checked: .../template/имя.yaml and .../имя.yaml` — проверьте переменную `CONFIG` и путь к файлу.
+3. Ошибка парсинга: meow-rs указывает точную строку и причину (Class A/B); отладочный файл пишется рядом с рабочей папкой. Проверить конфиг без запуска — `cmd="-t"`.
+4. Подписка пустая (`count=0`): она не в Clash-YAML формате. Возьмите из панели ссылку формата Clash.
+5. Кодировка: сохраняйте шаблоны в **UTF-8 без BOM** — BOM ломает парсинг.
+6. Переменные подставляются только при старте контейнера — после изменения `envs` нужен перезапуск.
+
+## Дополнительная справка
+
+- **Шаблоны конфигурации:** [TEMPLATES.md](TEMPLATES.md)
+- **meow-rs:** https://github.com/meow-rs/meow-rs (README, migration guide)
+- **Контейнер mihomo-оригинал:** https://hub.docker.com/r/wiktorbgu/mihomo-mikrotik
+- **Документация mihomo:** https://wiki.metacubex.one/
+- **Фильтр подписок:** https://github.com/Viktor45/fumox
+
+Лицензия — [MIT](LICENSE).

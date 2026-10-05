@@ -1,0 +1,98 @@
+# Список доменов ИИ-сервисов и инструментов разработчика.
+#
+# Подключается в stargate.yaml как rule-provider misc-ai (behavior: classical)
+# и отправляется в группу "AI & Разработка". Отдельные провайдеры (openai,
+# anthropic, perplexity, google-gemini, microsoft) берутся из MetaCubeX — здесь
+# то, чего у них нет: консоли разработчика, песочницы, CDN и API-хосты.
+#
+# Формат: Clash classical (payload со списком доменов).
+# Правка: добавьте домен в payload и перезапустите контейнер - провайдер
+# перечитается по своему интервалу (86400 ч, то есть раз в сутки).
+
+payload:
+  # --- консоли и панели ИИ ---
+  - chat.openai.com
+  - platform.openai.com
+  - openai.com
+  - oaistatic.com
+  - oaiusercontent.com
+  - sora.com
+  - claude.ai
+  - console.anthropic.com
+  - anthropic.com
+  - perplexity.ai
+  - labs.google
+  - ai.google.dev
+  - gemini.google.com
+  - generativelanguage.googleapis.com
+  - ai.azure.com
+  - copilot.microsoft.com
+  - copilot.cloud.microsoft
+  - githubcopilot.com
+  - huggingface.co
+  - hf.co
+  - replicate.com
+  - together.ai
+  - groq.com
+  - mistral.ai
+  - poe.com
+  - you.com
+  - phind.com
+  - cursor.sh
+  - cursor.com
+  - windsurf.dev
+  - codeium.com
+  - tabnine.com
+
+  # --- API-хосты, часто не покрытые geosite ---
+  - api.openai.com
+  - api.anthropic.com
+  - api.groq.com
+  - api.together.xyz
+  - api.replicate.com
+  - api.mistral.ai
+  - api-inference.huggingface.co
+  - ollama.com
+  - openrouter.ai
+
+  # --- CDN и ассеты, которые тянут эти сервисы ---
+  - cdn.oaistatic.com
+  - cdn.openai.com
+  - download.jetbrains.com
+  - download.visualstudio.microsoft.com
+  - vscode.download.prss.microsoft.com
+  - update.code.visualstudio.com
+  - dotnetcli.azureedge.net
+  - dotnetcli.blob.core.windows.net
+  - packages.microsoft.com
+
+  # --- реестры пакетов и зеркала, которые обычно нужны CI и разработке ---
+  - registry.npmjs.org
+  - registry.yarnpkg.com
+  - pypi.org
+  - files.pythonhosted.org
+  - proxy.golang.org
+  - crates.io
+  - static.crates.io
+  - rubygems.org
+  - packagist.org
+  - repo.maven.apache.org
+  - plugins.gradle.org
+  - hub.docker.com
+  - ghcr.io
+  - index.docker.io
+
+  # --- CI/CD и хостинги кода ---
+  - github.com
+  - api.github.com
+  - codeload.github.com
+  - raw.githubusercontent.com
+  - objects.githubusercontent.com
+  - gitlab.com
+  - bitbucket.org
+  - ci.appveyor.com
+  - circleci.com
+  - app.travis-ci.com
+  - codecov.io
+  - s3.amazonaws.com
+  - storage.googleapis.com
