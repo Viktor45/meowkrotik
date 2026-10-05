@@ -10,7 +10,13 @@
 # release-asset:
 #   amd64   -> x86_64-unknown-linux-musl       (статический)
 #   arm64   -> aarch64-unknown-linux-musl      (статический)
-#   arm/v7  -> armv7-unknown-linux-gnueabihf   (glibc, динамический — база Debian)
+#   arm/v7  -> armv7-unknown-linux-gnueabihf   (glibc, динамический)
+#
+# Для arm/v7 musl-сборки у meow-rs нет, а gcompat в Alpine на armhf не содержит
+# версионированных символов GLIBC (бинарнику нужен GLIBC_2.28), поэтому execve
+# падает с "No such file or directory" на существующем файле. Потому arm/v7
+# собирается на glibc-базе: BASE_IMAGE=debian:bookworm-slim. amd64/arm64
+# остаются на alpine с gcompat и musl-бинарниками.
 # Стейдж fetch выполняется на родной архитектуре хоста (--platform=$BUILDPLATFORM):
 # скачивание не зависит от архитектуры, меняется только имя файла.
 #
@@ -20,6 +26,9 @@
 # ===========================================================================================
 
 ARG MEOW_VERSION=latest
+# База рантайм-слоя. Alpine (musl) по умолчанию; arm/v7 требует glibc-базы,
+# её задаёт CI через --build-arg BASE_IMAGE=... (см. .github/workflows).
+ARG BASE_IMAGE=alpine:latest
 
 # ---- Stage 1: скачивание релизного бинарника meow-rs ---------------------------------------
 
@@ -60,24 +69,40 @@ RUN set -eux; \
 
 # ---- Stage 2: рантайм-слой ----------------------------------------------------------------
 
-FROM alpine:latest AS runtime
+FROM ${BASE_IMAGE} AS runtime
 
 ARG TARGETPLATFORM
 
+# Alpine несёт busybox-реализацию ip/awk/sed и ставит envsubst из gettext;
+# Debian-slim — нет, поэтому набор пакетов свой. iproute2 и kmod нужны
+# entrypoint.sh в обоих случаях: ip для маршрутов и veth, lsmod для проверки
+# наличия модуля nftables. В Debian бинарники legacy лежат внутри пакета
+# iptables (/usr/sbin/iptables-legacy -> xtables-legacy-multi), отдельного
+# пакета iptables-legacy там нет, в отличие от Alpine.
 RUN case "$TARGETPLATFORM" in \
     linux/arm64 | linux/amd64) \
-    apk add --no-cache tini tzdata gcompat nftables envsubst ca-certificates ;; \
+    apk add --no-cache tini tzdata gcompat nftables envsubst ca-certificates && \
+    rm -rf /var/cache/apk/* ;; \
     linux/arm/v7) \
-    apk add --no-cache tini tzdata gcompat iptables iptables-legacy envsubst ca-certificates && \
+    export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        tini gettext-base iptables iproute2 kmod ca-certificates tzdata && \
+    rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/sbin/iptables-legacy /usr/sbin/iptables && \
     ln -sf /usr/sbin/iptables-legacy-save /usr/sbin/iptables-save && \
     ln -sf /usr/sbin/iptables-legacy-restore /usr/sbin/iptables-restore && \
     ln -sf /usr/sbin/ip6tables-legacy /usr/sbin/ip6tables && \
     ln -sf /usr/sbin/ip6tables-legacy-save /usr/sbin/ip6tables-save && \
-    ln -sf /usr/sbin/ip6tables-legacy-restore /usr/sbin/ip6tables-restore ;; \
+    ln -sf /usr/sbin/ip6tables-legacy-restore /usr/sbin/ip6tables-restore && \
+    # /bin/sh в Debian — это dash, а entrypoint.sh написан под busybox ash:
+    # подстановка процесса <(...) и [[ ]] dash не понимает и роняет скрипт на
+    # синтаксисе. bash в базе уже есть, поэтому просто назначаем его /bin/sh.
+    # Трогается только arm/v7; на Alpine ash эти конструкции принимает.
+    ln -sf /bin/bash /bin/sh ;; \
     *) \
     echo "Unsupported platform: $TARGETPLATFORM" >&2; exit 1 ;; \
-    esac && rm -rf /var/cache/apk/*
+    esac
 
 # meow-rs совместим с CLI mihomo, но entrypoint.sh вызывает "mihomo";
 # алиас убирает расхождение без правки скрипта.

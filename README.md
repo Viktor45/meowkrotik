@@ -1,6 +1,7 @@
 <!-- TOC -->
 - [meowkrotik — meow-rs на MikroTik](#meowkrotik--meow-rs-на-mikrotik)
   - [Что это](#что-это)
+  - [Что где лежит](#что-где-лежит)
   - [Подготовка сети MikroTik](#подготовка-сети-mikrotik)
   - [Быстрый старт через переменные окружения](#быстрый-старт-через-переменные-окружения)
     - [Серверы SRV (локальные)](#серверы-srv-локальные)
@@ -36,16 +37,16 @@
 
 ## Что где лежит
 
-| Путь | Что это |
-| :--- | :--- |
-| `Dockerfile` | Сборка образа: meow-rs под именем `mihomo`, переменные по умолчанию, alpine + tini + envsubst |
-| `entrypoint.sh` | То, что запускается в контейнере: ставит nftables/iptables, готовит TUN, собирает провайдеров из `SUB*`/`SRV*`, подставляет `$VARIABLE` в шаблон |
-| `default_config.yaml` | Конфиг по умолчанию; копируется в образ и в рабочую папку при старте |
-| `templates/` | Шесть готовых шаблонов (Lite, Full, Mini, Nano, Area, Chain) |
-| `templates/area/`, `templates/chain/` | Шаблоны, которым нужен сопутствующий `.sh`-скрипт |
-| `rules/ai-dev.yaml` | Собственный список доменов ИИ и инструментов разработки, подключается в Full |
-| `TEMPLATES.md` | Каталог шаблонов: сравнение, замеры, переменные, установка |
-| `.github/workflows/` | Ручная публикация образа в GHCR |
+| Путь                                  | Что это                                                                                                                                          |
+| :------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Dockerfile`                          | Сборка образа: meow-rs под именем `mihomo`, переменные по умолчанию, alpine + tini + envsubst                                                    |
+| `entrypoint.sh`                       | То, что запускается в контейнере: ставит nftables/iptables, готовит TUN, собирает провайдеров из `SUB*`/`SRV*`, подставляет `$VARIABLE` в шаблон |
+| `default_config.yaml`                 | Конфиг по умолчанию; копируется в образ и в рабочую папку при старте                                                                             |
+| `templates/`                          | Шесть готовых шаблонов (Lite, Full, Mini, Nano, Area, Chain)                                                                                     |
+| `templates/area/`, `templates/chain/` | Шаблоны, которым нужен сопутствующий `.sh`-скрипт                                                                                                |
+| `rules/ai-dev.yaml`                   | Собственный список доменов ИИ и инструментов разработки, подключается в Full                                                                     |
+| `TEMPLATES.md`                        | Каталог шаблонов: сравнение, замеры, переменные, установка                                                                                       |
+| `.github/workflows/`                  | Ручная публикация образа в GHCR                                                                                                                  |
 
 ## Подготовка сети MikroTik
 
@@ -101,25 +102,31 @@
 - `dns` — DNS контейнера, который виден внутри как `/etc/resolv.conf`;
 - `cmd` не задавайте: пустой `cmd` (значение по умолчанию в RouterOS) запускает ядро в рабочем режиме. Аргументы ядра передаются для разовых задач: `cmd="-t"` — проверить конфиг, `cmd="-v"` — версия.
 
-Затем запустите контейнер: `/container start [find name="meow"]` (или Winbox → Container → Start).
-
 Для гибкой настройки смонтируйте рабочую папку — туда же кладутся шаблоны и скрипты:
 
 ```bash
-/container mounts add dst=/etc/mihomo name=MEOW_CFG src=/usb1/docker_configs/meowkrotik
-/container set [find name="meow"] mounts=MEOW_CFG
+/container mounts add dst=/etc/mihomo list=MEOW_CFG src=/usb1/docker_configs/meowkrotik
+/container set [find name="meow"] mountlists=MEOW_CFG
 ```
+
+Настройте доступ контейнера в интернет:
+```bash
+/ip firewall nat add action=masquerade chain=srcnat comment="MEOW" disabled=no log=no src-address=192.168.250.0/24
+```
+
+Затем запустите контейнер: `/container start [find name="meow"]` (или Winbox → Container → Start).
+
 
 Внутри контейнера `/etc/mihomo` — это рабочая папка (`$WORKDIR`). Из неё ядро читает шаблоны и скрипты и в неё же пишет всё рабочее:
 
-| Путь в контейнере | Что там | Кто пишет |
-| :--- | :--- | :--- |
-| `/etc/mihomo/template/` | файлы шаблонов | вы |
-| `/etc/mihomo/user_sh/` | скрипты шаблона, выполняются при старте | вы |
-| `/etc/mihomo/<имя шаблона>` | готовый конфиг после подстановки `$VARIABLE` | `entrypoint.sh` |
-| `/etc/mihomo/rule-sets/` | скачанные списки правил | ядро |
-| `/etc/mihomo/srv.yaml`, `veth.yaml` | локальные прокси и дополнительные veth | `entrypoint.sh` |
-| `/etc/mihomo/.hwid`, `.ui_url` | идентификатор устройства и последняя ссылка на панель | `entrypoint.sh` |
+| Путь в контейнере                   | Что там                                               | Кто пишет       |
+| :---------------------------------- | :---------------------------------------------------- | :-------------- |
+| `/etc/mihomo/template/`             | файлы шаблонов                                        | вы              |
+| `/etc/mihomo/user_sh/`              | скрипты шаблона, выполняются при старте               | вы              |
+| `/etc/mihomo/<имя шаблона>`         | готовый конфиг после подстановки `$VARIABLE`          | `entrypoint.sh` |
+| `/etc/mihomo/rule-sets/`            | скачанные списки правил                               | ядро            |
+| `/etc/mihomo/srv.yaml`, `veth.yaml` | локальные прокси и дополнительные veth                | `entrypoint.sh` |
+| `/etc/mihomo/.hwid`, `.ui_url`      | идентификатор устройства и последняя ссылка на панель | `entrypoint.sh` |
 
 Готовый конфиг лежит **вне** папки `template`, и на каждом старте перезаписывается. Правку шаблона ядро не подхватывает на лету — после любого изменения нужен перезапуск контейнера.
 
@@ -203,13 +210,13 @@
 
 | Конфиг                | Пик памяти | Память после старта | Место всего |
 | :-------------------- | ---------: | ------------------: | ----------: |
-| Full (`stargate`)     |   37.9 МБ  |           11.2 МБ   |   24.0 МБ   |
-| Lite                  |   11.3 МБ  |            4.9 МБ   |    168 КБ   |
-| Mini                  |   11.5 МБ  |            8.3 МБ   |    108 КБ   |
-| Nano                  |    8.5 МБ  |            2.1 МБ   |     56 КБ   |
-| Area (3 страны)       |   17.4 МБ  |            7.9 МБ   |    188 КБ   |
-| Chain                 |   17.7 МБ  |            4.1 МБ   |    192 КБ   |
-| `default_config.yaml` |   16.8 МБ  |           11.2 МБ   |     24 КБ   |
+| Full (`stargate`)     |    37.9 МБ |             11.2 МБ |     24.0 МБ |
+| Lite                  |    11.3 МБ |              4.9 МБ |      168 КБ |
+| Mini                  |    11.5 МБ |              8.3 МБ |      108 КБ |
+| Nano                  |     8.5 МБ |              2.1 МБ |       56 КБ |
+| Area (3 страны)       |    17.4 МБ |              7.9 МБ |      188 КБ |
+| Chain                 |    17.7 МБ |              4.1 МБ |      192 КБ |
+| `default_config.yaml` |    16.8 МБ |             11.2 МБ |       24 КБ |
 
 Кроме Full все шаблоны занимают меньше 200 КБ. Full раздувают геобазы: 22.9 МБ из 24.0 МБ — это `Country.mmdb`, `GeoLite2-ASN.mmdb` и `geosite.dat`.
 
@@ -221,7 +228,9 @@
 docker build -t meowkrotik .
 ```
 
-- `--platform linux/arm/v7` для 32-битных ARM (сборка под эмуляцией QEMU/Binfmt);
+- `--platform linux/arm/v7` для 32-битных ARM (сборка под эмуляцией QEMU/Binfmt). У meow-rs нет musl-сборки под armv7,
+  поэтому эта платформа собирается на glibc-базе: добавьте `--build-arg BASE_IMAGE=debian:bookworm-slim`.
+  Без этого образа контейнер не стартует с `execve: No such file or directory`.
 - `--build-arg MEOW_VERSION=v0.22.0` пинит конкретный релиз meow-rs (по умолчанию `latest` резолвит новейший через GitHub API при сборке);
 - В CI: Actions → **Docker meow** → Run workflow (публикация на GHCR, аттестация каждой платформы, потом мультиарх-манифест).
 
@@ -236,13 +245,13 @@ docker build -t meowkrotik .
 | TUN-инбаунд                                                                                                                             | ✅ Секция верхнего уровня `tun:`, а не listener `type: tun` (такой тип слушателя — жёсткая ошибка). `inet4-address` — строка; `inet6-address` — только с `auto-route: global`. Поля `stack`, `strict-route`, `auto-redirect`, `auto-detect-interface` принимаются с warning и игнорируются. Вход TUN для `IN-NAME` всегда `meow-tun` |
 | tproxy-слушатель с `udp: true`                                                                                                          | ⚠️ Только вместе с `firewall: false` — ядро не ставит правила для UDP TPROXY сам (их ставит entrypoint через nft)                                                                                                                                                                                                                    |
 | `external-ui-url` (автоскачивание панели)                                                                                               | ❌ Не скачивается; встроенный дашборд доступен всегда                                                                                                                                                                                                                                                                                |
-| TUIC / SSH исходящие                                                                                                                     | ❌ Не реализованы                                                                                                                                                                                                                                                                               |
+| TUIC / SSH исходящие                                                                                                                    | ❌ Не реализованы                                                                                                                                                                                                                                                                                                                    |
 | `quic://` DNS (DoQ)                                                                                                                     | ❌ Жёсткая ошибка; используйте `tls://`/`https://`                                                                                                                                                                                                                                                                                   |
 | VLESS `flow: xtls-rprx-direct`                                                                                                          | ❌ Только `xtls-rprx-vision`                                                                                                                                                                                                                                                                                                         |
 | GEOIP по нестандартным категориям (ZKEEN: akamai, amazon, …)                                                                            | ❌ Только ISO-коды стран (Country.mmdb); CDN/облака в шаблоне Stargate вынесены в ipcidr rule-providers                                                                                                                                                                                                                              |
 | GEOSITE по нестандартным категориям (ZKEEN: domains/other/politic)                                                                      | ❌ Таких категорий нет в базе MetaCubeX; в шаблоне Stargate заменены доменными списками legiz-ru                                                                                                                                                                                                                                     |
 | `geodata-mode` / `geox-url` / `geo-auto-update`                                                                                         | ⚠️ Игнорируются; используйте секцию `geodata:` (пути, URL, `auto-update`)                                                                                                                                                                                                                                                            |
-| Загрузка геобаз (`Country.mmdb`, `GeoLite2-ASN.mmdb`, `geosite.dat`) | ⚠️ Скачиваются при старте **безусловно**, если файла нет: ни `auto-update`, ни наличие GEOIP/GEOSITE-правил ядро не проверяет. Отключается только указанием в `geodata:` путей к уже существующим файлам (в пяти шаблонах и `default_config.yaml` это `/dev/null`). На Full это 22.9 МБ, остальным шаблонам базы не нужны |
+| Загрузка геобаз (`Country.mmdb`, `GeoLite2-ASN.mmdb`, `geosite.dat`)                                                                    | ⚠️ Скачиваются при старте **безусловно**, если файла нет: ни `auto-update`, ни наличие GEOIP/GEOSITE-правил ядро не проверяет. Отключается только указанием в `geodata:` путей к уже существующим файлам (в пяти шаблонах и `default_config.yaml` это `/dev/null`). На Full это 22.9 МБ, остальным шаблонам базы не нужны            |
 | Вложенные merge-ключи `<<:` (якорь, ссылающийся на якорь с `<<:`)                                                                       | ❌ Не разворачиваются → `missing field`; все якоря в шаблонах заданы полными                                                                                                                                                                                                                                                         |
 | `RULE-SET` внутри `AND`/`OR`/`NOT`                                                                                                      | ❌ Не парсится; в шаблонах развёрнуто в последовательные правила                                                                                                                                                                                                                                                                     |
 | Спец-прокси `PASS`, `PASS-RULE`, `COMPATIBLE`                                                                                           | ✅ Снова встроены (0.22)                                                                                                                                                                                                                                                                                                             |

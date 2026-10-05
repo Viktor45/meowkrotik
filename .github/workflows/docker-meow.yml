@@ -63,6 +63,9 @@ jobs:
           # qemu set up before buildx; see the "Set up QEMU" step.
           - platform: linux/arm/v7
             runner: ubuntu-24.04
+            # musl-сборки meow-rs под armv7 не существует, а gcompat в Alpine
+            # на armhf не даёт нужных символов GLIBC — берём glibc-базу.
+            base: debian:bookworm-slim
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Prepare
@@ -119,6 +122,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             MEOW_VERSION=${{ env.MEOW_VERSION }}
+            BASE_IMAGE=${{ matrix.base || 'alpine:latest' }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=meow-${{ env.PLATFORM_PAIR }}
