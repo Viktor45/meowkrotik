@@ -2,56 +2,141 @@
 #
 # Образ meow-rs (https://github.com/meow-rs/meow-rs) — drop-in замена mihomo
 # в контейнере wiktorbgu/mihomo-mikrotik: тот же entrypoint.sh, та же модель
-# шаблонов/envsubst и переменных окружения, но ядром выступает релизный бинарник
+# шаблонов/envsubst и переменных окружения, но ядром выступает бинарник
 # meow-rs, совместимый с конфигами mihomo (переключатели, провайдеры, правила).
 #
 # Мультиархитектурная сборка (docker buildx --platform linux/amd64,linux/arm64,
-# linux/arm/v7): BuildKit передаёт TARGETARCH/TARGETVARIANT, по ним выбирается
-# release-asset:
-#   amd64   -> x86_64-unknown-linux-musl       (статический)
-#   arm64   -> aarch64-unknown-linux-musl      (статический)
-#   arm/v7  -> armv7-unknown-linux-gnueabihf   (glibc, динамический)
+# linux/arm/v7). BuildKit передаёт TARGETARCH/TARGETVARIANT, и способ получения
+# бинарника выбирается по ним:
+#   amd64   -> релиз meow-rs x86_64-unknown-linux-musl   (скачивается)
+#   arm64   -> релиз meow-rs aarch64-unknown-linux-musl  (скачивается)
+#   arm/v7  -> СБОРКА ИЗ ИСХОДНИКОВ под armv7-unknown-linux-musleabihf
 #
-# Для arm/v7 musl-сборки у meow-rs нет, а gcompat в Alpine на armhf не содержит
-# версионированных символов GLIBC (бинарнику нужен GLIBC_2.28), поэтому execve
-# падает с "No such file or directory" на существующем файле. Потому arm/v7
-# собирается на glibc-базе: BASE_IMAGE=debian:bookworm-slim. amd64/arm64
-# остаются на alpine с gcompat и musl-бинарниками.
-# Стейдж fetch выполняется на родной архитектуре хоста (--platform=$BUILDPLATFORM):
-# скачивание не зависит от архитектуры, меняется только имя файла.
+# Почему arm/v7 собирается у нас, а не скачивается: релизов под 32-битный musl
+# у meow-rs нет, а единственный armv7-релиз (armv7-unknown-linux-gnueabihf)
+# динамический и требует GLIBC_2.28. В Alpine на armhf gcompat этих символов не
+# даёт, поэтому execve падал с "No such file or directory" на существующем
+# файле. Статический musl-бинарник обеих проблем снимает: он не зависит ни от
+# базы, ни от gcompat, и Alpine снова подходит всем трём архитектурам.
 #
-# Переменная сборки MEOW_VERSION выбирает релиз meow-rs: latest (по умолчанию)
-# резолвит новейший релиз через GitHub API прямо при сборке, конкретный тег
-# (например v0.21.2) пинит точную версию.
+# Кросс-компиляция arm/v7 идёт на родной архитектуре хоста
+# (--platform=$BUILDPLATFORM) тулчейном musl-cross: armv7-unknown-linux-musleabihf-gcc
+# со статической musl, sysroot'ом и линкером в комплекте. Тулчейн поставляется
+# образом messense/rust-musl-cross, который собран под архитектуру ХОСТА,
+# поэтому его тег заканчивается на -amd64 или -arm64; сборка arm/v7 на чужой
+# архитектуре хоста требует подставить свой тег в BUILDER_IMAGE.
+#
+# Переменная сборки MEOW_VERSION выбирает версию meow-rs: latest (по умолчанию)
+# для скачиваемых релизов резолвит новейшую через GitHub API, а для arm/v7 берёт
+# ветку main; конкретный тег (например v0.22.0) пинит версию в обоих случаях.
 # ===========================================================================================
 
 ARG MEOW_VERSION=latest
-# База рантайм-слоя. Alpine (musl) по умолчанию; arm/v7 требует glibc-базы,
-# её задаёт CI через --build-arg BASE_IMAGE=... (см. .github/workflows).
-ARG BASE_IMAGE=alpine:latest
+# База стадии сборки. arm/v7 требует кросс-тулчейна (rustc + musl-gcc + cmake +
+# libclang для BoringSSL), amd64/arm64 он не нужен, и CI подставляет alpine,
+# чтобы не тянуть лишний образ. Тег musl-cross заканчивается на архитектуру
+# хоста: -amd64 или -arm64.
+ARG BUILDER_IMAGE=messense/rust-musl-cross:armv7-musleabihf-amd64
 
-# ---- Stage 1: скачивание релизного бинарника meow-rs ---------------------------------------
+# ---- Stage 1: получение бинарника meow-rs -------------------------------------------------
 
-FROM --platform=$BUILDPLATFORM alpine:latest AS fetch
+FROM --platform=$BUILDPLATFORM ${BUILDER_IMAGE} AS meow
 ARG MEOW_VERSION
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-RUN apk add --no-cache ca-certificates curl \
-    && rm -rf /var/cache/apk/*
+# curl нужен обеим веткам (скачать релиз / скачать исходники), cmake и clang —
+# только arm/v7: BoringSSL собирается из исходников, а его bindgen требует
+# libclang. Тулчейн подставляет CC/CXX/линкер/sysroot сам через переменные
+# окружения вида *_armv7_unknown_linux_musleabihf.
 RUN set -eux; \
+    if command -v apk >/dev/null 2>&1; then \
+        apk add --no-cache curl ca-certificates; \
+    else \
+        apt-get update; \
+        apt-get install -y --no-install-recommends curl ca-certificates; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    if [ "${TARGETARCH:-}" != "arm" ]; then exit 0; fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends cmake clang libclang-dev; \
+    rm -rf /var/lib/apt/lists/*
+
+# Сборка arm/v7 из исходников разбита на отдельные шаги намеренно: так кэш
+# Docker переживает смену версии meow-rs (шаг сборки пересобирается, а скачанные
+# исходники и распакованный реестр крейтов — нет).
+ENV BINDGEN_EXTRA_CLANG_ARGS="--target=armv7-unknown-linux-musleabihf --sysroot=${TARGET_HOME} -I${TARGET_C_INCLUDE_PATH}" \
+    CARGO_HTTP_LOW_SPEED_LIMIT=0 \
+    CARGO_HTTP_TIMEOUT=600 \
+    CARGO_NET_RETRY=10
+# Линковка статической musl-программы идёт с -nodefaultlibs, поэтому libgcc не
+# подключается — а его builtin'ы (__sync_add_and_fetch_4 и соседние) нужны
+# libstdc++.a, который тянет за собой C++-код BoringSSL/quiche. Отсюда -lgcc.
+# Обратная сторона: libgcc определяет часть этих символов и сам, а Rust уже
+# тащит свой compiler_builtins, поэтому линкер ругается на дубли — гасим это
+# --allow-multiple-definition. +crt-static повторяет то, что выставляет образ
+# тулчейна: Dockerfile не разворачивает ENV базового образа, значение нужно
+# указать явно.
+ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-lgcc -C link-arg=-lgcc_eh -C link-arg=-Wl,--allow-multiple-definition"
+
+RUN set -eux; \
+    if [ "${TARGETARCH:-}" != "arm" ]; then \
+        echo "TARGETARCH=${TARGETARCH:-} — берём релизный бинарник, тулчейн не нужен"; \
+        exit 0; \
+    fi; \
+    command -v armv7-unknown-linux-musleabihf-gcc >/dev/null 2>&1 || { \
+        echo "Для сборки arm/v7 нужен musl-кросс-тулчейн. Передайте образ под архитектуру хоста," >&2; \
+        echo "например --build-arg BUILDER_IMAGE=messense/rust-musl-cross:armv7-musleabihf-amd64" >&2; \
+        exit 1; \
+    }; \
+    case "${TARGETVARIANT:-v7}" in \
+        v7) ;; *) echo "unsupported TARGETVARIANT: ${TARGETVARIANT}" >&2; exit 1 ;; \
+    esac; \
+    if [ "$MEOW_VERSION" = "latest" ]; then ref=main; else ref="$MEOW_VERSION"; fi; \
+    case "$ref" in \
+        v[0-9]*) url="https://codeload.github.com/meow-rs/meow-rs/tar.gz/refs/tags/${ref}" ;; \
+        main)   url="https://codeload.github.com/meow-rs/meow-rs/tar.gz/refs/heads/main" ;; \
+        *) echo "MEOW_VERSION=${MEOW_VERSION}: ожидается 'latest' или тег вида v0.22.0" >&2; exit 1 ;; \
+    esac; \
+    echo "building meow-rs ${ref} from source"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/src.tar.gz "$url"; \
+    mkdir -p /src && tar -xzf /tmp/src.tar.gz --strip-components=1 -C /src && rm -f /tmp/src.tar.gz; \
+    rm -f /src/rust-toolchain.toml; \
+    cd /src
+
+RUN set -eux; \
+    if [ "${TARGETARCH:-}" != "arm" ]; then exit 0; fi; \
+    cd /src; \
+    cargo fetch --locked; \
+    # Крейт boring берёт time_t из Rust-libc (на 32-битной цели это i32), а musl в \
+    # этом тулчейне объявляет time_t 64-битным, поэтому bindgen видит 64-битную \
+    # сигнатуру X509_VERIFY_PARAM_set_time и rustc падает на несовпадении типов. \
+    # Затрагивается ровно одно место — X509VerifyParam::set_time, который meow-rs \
+    # не вызывает ни разу, — так что приведение безопасно и просто делает вызов \
+    # ABI-корректным. \
+    boring=$(echo "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/boring-*/src/x509/verify.rs); \
+    [ -f "$boring" ] || { echo "исходники крейта boring не найдены в реестре cargo" >&2; exit 1; }; \
+    sed -i 's|X509_VERIFY_PARAM_set_time(self\.as_ptr(), time)|X509_VERIFY_PARAM_set_time(self.as_ptr(), time.into())|' "$boring"; \
+    grep -q 'X509_VERIFY_PARAM_set_time(self.as_ptr(), time.into())' "$boring"
+
+RUN set -eux; \
+    if [ "${TARGETARCH:-}" != "arm" ]; then exit 0; fi; \
+    cd /src; \
+    cargo build --release --locked --target armv7-unknown-linux-musleabihf --bin meow; \
+    install -m 0755 target/armv7-unknown-linux-musleabihf/release/meow /usr/local/bin/meow; \
+    file /usr/local/bin/meow; \
+    ldd /usr/local/bin/meow 2>&1 || true
+
+# Скачивание релиза — только для архитектур, которым meow-rs его публикует.
+RUN set -eux; \
+    if [ "${TARGETARCH:-}" = "arm" ]; then exit 0; fi; \
     case "${TARGETARCH:-amd64}" in \
         amd64) target=x86_64-unknown-linux-musl ;; \
         arm64) target=aarch64-unknown-linux-musl ;; \
-        arm) \
-            case "${TARGETVARIANT:-v7}" in \
-                v7) target=armv7-unknown-linux-gnueabihf ;; \
-                *) echo "unsupported TARGETARCH/TARGETVARIANT: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
-            esac ;; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     if [ "$MEOW_VERSION" = "latest" ]; then \
-        asset_url=$(curl -fsSL https://api.github.com/repos/meow-rs/meow-rs/releases/latest \
+        asset_url=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 https://api.github.com/repos/meow-rs/meow-rs/releases/latest \
             | grep "browser_download_url" | cut -d '"' -f 4 \
             | grep -- "-${target}\.tar\.gz" | head -n 1); \
         [ -n "$asset_url" ] || { echo "no meow-rs release asset for ${target}" >&2; exit 1; }; \
@@ -59,7 +144,7 @@ RUN set -eux; \
         asset_url="https://github.com/meow-rs/meow-rs/releases/download/${MEOW_VERSION}/meow-${MEOW_VERSION}-${target}.tar.gz"; \
     fi; \
     echo "fetching $asset_url"; \
-    curl -fsSL -o /tmp/meow.tar.gz "$asset_url"; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/meow.tar.gz "$asset_url"; \
     mkdir -p /tmp/meow-extract; \
     tar -xzf /tmp/meow.tar.gz -C /tmp/meow-extract; \
     binary=$(find /tmp/meow-extract -type f -name meow -print -quit); \
@@ -69,44 +154,28 @@ RUN set -eux; \
 
 # ---- Stage 2: рантайм-слой ----------------------------------------------------------------
 
-FROM ${BASE_IMAGE} AS runtime
+FROM alpine:latest AS runtime
 
 ARG TARGETPLATFORM
 
-# Alpine несёт busybox-реализацию ip/awk/sed и ставит envsubst из gettext;
-# Debian-slim — нет, поэтому набор пакетов свой. iproute2 и kmod нужны
-# entrypoint.sh в обоих случаях: ip для маршрутов и veth, lsmod для проверки
-# наличия модуля nftables. В Debian бинарники legacy лежат внутри пакета
-# iptables (/usr/sbin/iptables-legacy -> xtables-legacy-multi), отдельного
-# пакета iptables-legacy там нет, в отличие от Alpine.
+# Все три архитектуры — musl, база общая. amd64/arm64 получают nftables
+# (маршрутизация в ядре) и gcompat; arm/v7 берёт iptables-legacy, потому что
+# nftables в Alpine для armhf нет. gcompat на arm/v7 не нужен: бинарник
+# статический.
 RUN case "$TARGETPLATFORM" in \
     linux/arm64 | linux/amd64) \
     apk add --no-cache tini tzdata gcompat nftables envsubst ca-certificates && \
     rm -rf /var/cache/apk/* ;; \
     linux/arm/v7) \
-    export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-        tini gettext-base iptables iproute2 kmod ca-certificates tzdata && \
-    rm -rf /var/lib/apt/lists/* && \
-    ln -sf /usr/sbin/iptables-legacy /usr/sbin/iptables && \
-    ln -sf /usr/sbin/iptables-legacy-save /usr/sbin/iptables-save && \
-    ln -sf /usr/sbin/iptables-legacy-restore /usr/sbin/iptables-restore && \
-    ln -sf /usr/sbin/ip6tables-legacy /usr/sbin/ip6tables && \
-    ln -sf /usr/sbin/ip6tables-legacy-save /usr/sbin/ip6tables-save && \
-    ln -sf /usr/sbin/ip6tables-legacy-restore /usr/sbin/ip6tables-restore && \
-    # /bin/sh в Debian — это dash, а entrypoint.sh написан под busybox ash:
-    # подстановка процесса <(...) и [[ ]] dash не понимает и роняет скрипт на
-    # синтаксисе. bash в базе уже есть, поэтому просто назначаем его /bin/sh.
-    # Трогается только arm/v7; на Alpine ash эти конструкции принимает.
-    ln -sf /bin/bash /bin/sh ;; \
+    apk add --no-cache tini tzdata iptables iptables-legacy envsubst ca-certificates && \
+    rm -rf /var/cache/apk/* ;; \
     *) \
     echo "Unsupported platform: $TARGETPLATFORM" >&2; exit 1 ;; \
     esac
 
 # meow-rs совместим с CLI mihomo, но entrypoint.sh вызывает "mihomo";
 # алиас убирает расхождение без правки скрипта.
-COPY --from=fetch /usr/local/bin/meow /usr/local/bin/meow
+COPY --from=meow /usr/local/bin/meow /usr/local/bin/meow
 RUN ln -sf /usr/local/bin/meow /usr/local/bin/mihomo
 COPY entrypoint.sh /entrypoint.sh
 COPY default_config.yaml /etc/mihomo/template/default_config.yaml
