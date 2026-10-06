@@ -44,6 +44,14 @@ FROM --platform=$BUILDPLATFORM ${BUILDER_IMAGE} AS meow
 ARG MEOW_VERSION
 ARG TARGETARCH
 ARG TARGETVARIANT
+# Профиль сборки arm/v7 — по умолчанию ровно как собирает апстрим
+# (lto = "fat", codegen-units = 1), чтобы arm/v7 совпадал с официальными
+# бинарниками amd64/arm64 и по коду, и по размеру. Флаги оставлены как
+# ускорители на случай правок исходников: MEOW_LTO=thin MEOW_CODEGEN_UNITS=16
+# срезают сборку примерно на 9% (5m30s -> 4m59s на 4 ядрах), но добавляют к
+# бинарнику ~2 МБ (10.3 -> 12.3 МБ), поэтому включать их стоит осознанно.
+ARG MEOW_LTO=true
+ARG MEOW_CODEGEN_UNITS=1
 
 # curl нужен обеим веткам (скачать релиз / скачать исходники), cmake и clang —
 # только arm/v7: BoringSSL собирается из исходников, а его bindgen требует
@@ -63,12 +71,15 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Сборка arm/v7 из исходников разбита на отдельные шаги намеренно: так кэш
-# Docker переживает смену версии meow-rs (шаг сборки пересобирается, а скачанные
-# исходники и распакованный реестр крейтов — нет).
+# Docker переживает смену версии meow-rs — пересобирается только шаг сборки,
+# скачанные исходники остаются в слое, а реестр крейтов и target/ живут в
+# кэш-mount (ниже) и переживают вообще любую инвалидацию слоёв.
 ENV BINDGEN_EXTRA_CLANG_ARGS="--target=armv7-unknown-linux-musleabihf --sysroot=${TARGET_HOME} -I${TARGET_C_INCLUDE_PATH}" \
     CARGO_HTTP_LOW_SPEED_LIMIT=0 \
     CARGO_HTTP_TIMEOUT=600 \
-    CARGO_NET_RETRY=10
+    CARGO_NET_RETRY=10 \
+    CARGO_PROFILE_RELEASE_LTO=${MEOW_LTO} \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${MEOW_CODEGEN_UNITS}
 # Линковка статической musl-программы идёт с -nodefaultlibs, поэтому libgcc не
 # подключается — а его builtin'ы (__sync_add_and_fetch_4 и соседние) нужны
 # libstdc++.a, который тянет за собой C++-код BoringSSL/quiche. Отсюда -lgcc.
@@ -104,22 +115,44 @@ RUN set -eux; \
     rm -f /src/rust-toolchain.toml; \
     cd /src
 
-RUN set -eux; \
+RUN --mount=type=cache,id=meow-registry-armv7,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=meow-git-armv7,target=/root/.cargo/git,sharing=locked \
+    set -eux; \
     if [ "${TARGETARCH:-}" != "arm" ]; then exit 0; fi; \
     cd /src; \
     cargo fetch --locked; \
-    # Крейт boring берёт time_t из Rust-libc (на 32-битной цели это i32), а musl в \
+# Крейт boring берёт time_t из Rust-libc (на 32-битной цели это i32), а musl в \
     # этом тулчейне объявляет time_t 64-битным, поэтому bindgen видит 64-битную \
     # сигнатуру X509_VERIFY_PARAM_set_time и rustc падает на несовпадении типов. \
     # Затрагивается ровно одно место — X509VerifyParam::set_time, который meow-rs \
     # не вызывает ни разу, — так что приведение безопасно и просто делает вызов \
     # ABI-корректным. \
-    boring=$(echo "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/boring-*/src/x509/verify.rs); \
-    [ -f "$boring" ] || { echo "исходники крейта boring не найдены в реестре cargo" >&2; exit 1; }; \
-    sed -i 's|X509_VERIFY_PARAM_set_time(self\.as_ptr(), time)|X509_VERIFY_PARAM_set_time(self.as_ptr(), time.into())|' "$boring"; \
-    grep -q 'X509_VERIFY_PARAM_set_time(self.as_ptr(), time.into())' "$boring"
+    # Патчим ВСЕ найденные версии boring, а не первую: реестр лежит в кэш-mount и \
+    # копится между сборками, поэтому после сборки другой версии meow-rs в глоб \
+    # попадают две директории (например boring-5.1.0 и boring-5.2.0) и проверка \
+    # "[ -f $boring ]" на склеенном пути падала бы. sed идемпотентен: уже \
+    # пропатченная строка его шаблону не соответствует. \
+    patched=0; \
+    for f in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/boring-*/src/x509/verify.rs; do \
+        [ -f "$f" ] || continue; \
+        sed -i 's|X509_VERIFY_PARAM_set_time(self\.as_ptr(), time)|X509_VERIFY_PARAM_set_time(self.as_ptr(), time.into())|' "$f"; \
+        if grep -q 'X509_VERIFY_PARAM_set_time(self.as_ptr(), time.into())' "$f"; then patched=$((patched + 1)); fi; \
+    done; \
+    [ "$patched" -gt 0 ] || { echo "исходники крейта boring не найдены в реестре cargo" >&2; exit 1; }
 
-RUN set -eux; \
+# target/ живёт в кэш-mount, а не в слое: исходники meow-rs меняются на каждом
+# коммите ветки main (а MEOW_VERSION=latest именно её и тянет), и слойный кэш
+# от этого обнулялся бы целиком — сборка с нуля. В mount'е переживает
+# инвалидацию слоёв сам cargo: он по отпечаткам (fingerprint) сам решает, что
+# пересобрать, — при смене версии meow-rs пересобираются только крейты meow-* и
+# финальная линковка. CARGO_HOME в образе тулчейна — /root/.cargo, поэтому
+# mount'ы адресные. Кэш-mount не попадает в образ и в --cache-to: оба бэкенда
+# отдают слои; если ваша версия buildx выгружает и mount'ы, тёплая пересборка
+# переживает и переезд между раннерами.
+RUN --mount=type=cache,id=meow-registry-armv7,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=meow-git-armv7,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,id=meow-target-armv7,target=/src/target,sharing=locked \
+    set -eux; \
     if [ "${TARGETARCH:-}" != "arm" ]; then exit 0; fi; \
     cd /src; \
     cargo build --release --locked --target armv7-unknown-linux-musleabihf --bin meow; \

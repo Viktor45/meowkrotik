@@ -1,25 +1,30 @@
-# Builds the meow image (root Dockerfile — a thin wrapper around
-# a meow-rs release binary) for linux/amd64, linux/arm64 and linux/arm/v7 and
-# pushes a combined multi-arch manifest to GHCR.
+# Builds the meow image (root Dockerfile) for linux/amd64, linux/arm64 and
+# linux/arm/v7 and pushes a combined multi-arch manifest to GHCR.
 #
 # MANUAL ONLY: this workflow never runs on push or tags — dispatch it from
 # the Actions tab (or `gh workflow run docker-meow.yml [-f meow_version=v0.21.2]`).
 #
-# The MEOW_VERSION input picks the packaged meow-rs release, exactly like the
+# The MEOW_VERSION input picks the meow-rs version, exactly like the
 # MEOW_VERSION build arg of Dockerfile (and .env for local
-# builds): `latest` (default) resolves the newest upstream release at build
-# time through the GitHub API; a tag (e.g. v0.21.2) pins one. The input value
+# builds): `latest` (default) takes the newest upstream RELEASE for amd64/arm64
+# (resolved at build time through the GitHub API) and the tip of branch `main`
+# for arm/v7, which has no release; a tag (e.g. v0.21.2) pins one and makes the
+# arm/v7 source a fixed tarball, so reruns hit the cache. The input value
 # (whitespace-trimmed) is also applied as an image tag, so a pinned build is
 # addressable :v0.21.2.
 #
 # Strategy: amd64 and arm64 are built NATIVELY on matching GitHub runners
-# (apt-get is painfully slow under QEMU); arm/v7 has no native GitHub runner,
-# so it is built on an amd64 host. Its binary is COMPILED FROM SOURCE (meow-rs
-# publishes no armv7 musl release), but the compile stage runs on
-# $BUILDPLATFORM and cross-compiles with zig, so no QEMU is involved in the
-# expensive part — only the runtime stage runs emulated. Every platform is
-# pushed by digest and attested with actions/attest-build-provenance; a merge
-# job stitches the already-attested digests into one manifest list.
+# (apt-get is painfully slow under QEMU) and only download a release binary;
+# arm/v7 has no native GitHub runner, so it is built on an amd64 host. Its
+# binary is COMPILED FROM SOURCE (meow-rs publishes no armv7 musl release) with
+# a musl-cross toolchain, but the compile stage runs on $BUILDPLATFORM, so no
+# QEMU is involved in the expensive part — only the runtime stage runs
+# emulated. That compile is the only slow job here (about 5-6 min on a cold
+# cache, ~2 min when target/ survives in a cache mount); the other two platforms
+# take under a minute each.
+# Every platform is pushed by digest and attested with
+# actions/attest-build-provenance; a merge job stitches the already-attested
+# digests into one manifest list.
 #
 # Resulting tags:
 #   MEOW_VERSION=latest  -> latest, main, sha-<shortsha>
@@ -121,6 +126,12 @@ jobs:
 
       # Push the single-platform image by digest only; tags are attached by
       # the merge job once both architectures exist.
+      #
+      # The per-platform gha cache is what makes a rerun cheap: identical inputs
+      # hit the cache end to end, and the arm/v7 compile survives as long as the
+      # meow-rs tarball and the Dockerfile are unchanged — pin meow_version for
+      # that, branch main moves under you otherwise. The scope is per platform so
+      # the three jobs never overwrite each other's cache.
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
