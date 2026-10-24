@@ -161,9 +161,11 @@ add_provider() {
       - $HWID"
     fi
 
-    # interval: для http — период обновления подписки, для file (meow-rs
-    # 0.22+) — период перечитывания файла И расписания health-check. Без него
-    # file-провайдер загружается один раз и не проверяется по таймеру.
+    # interval: для http — период обновления подписки, для file — период
+    # перечитывания файла. Без него file-провайдер читается один раз. Блок
+    # health-check ниже ядро само по таймеру не опрашивает (с 0.26 он лишь
+    # хранится), но используется групповыми проверками url-test/fallback/
+    # load-balance и ручным healthcheck через API.
     interval_block="    interval: ${PROVIDER_INTERVAL}"$'\n'
 
     PROVIDERS_BLOCK="${PROVIDERS_BLOCK}  ${name}:
@@ -433,6 +435,26 @@ if [ "${ENVSUBST:-1}" -eq 1 ]; then
   envsubst < "$TEMPLATE_FILE" > "$WORKDIR/$CONFIG"
 fi
 
-CMD_MIHOMO="${@:-"-d $WORKDIR -f $WORKDIR/$CONFIG"}"
+# Собираем командную строку ядра.
+# Без аргументов — рабочий режим: -d <рабочая папка> -f <собранный конфиг>.
+# Если пользователь просит только проверку (-t) и не указал свой -f, добавляем
+# собранный конфиг сами: meow по умолчанию ищет "config.yaml" и на -t без -f
+# падает с "failed to read config file config.yaml".
+if [ "$#" -eq 0 ]; then
+    set -- -d "$WORKDIR" -f "$WORKDIR/$CONFIG"
+else
+    has_config=0
+    wants_test=0
+    for arg in "$@"; do
+        case "$arg" in
+            -f|--config|--config=*) has_config=1 ;;
+            -t|--test) wants_test=1 ;;
+        esac
+    done
+    if [ "$wants_test" -eq 1 ] && [ "$has_config" -eq 0 ]; then
+        set -- -d "$WORKDIR" -f "$WORKDIR/$CONFIG" "$@"
+    fi
+fi
+
 mihomo -v
-exec mihomo $CMD_MIHOMO || exit 1
+exec mihomo "$@" || exit 1

@@ -28,7 +28,7 @@
 #
 # Переменная сборки MEOW_VERSION выбирает версию meow-rs: latest (по умолчанию)
 # для скачиваемых релизов резолвит новейшую через GitHub API, а для arm/v7 берёт
-# ветку main; конкретный тег (например v0.22.0) пинит версию в обоих случаях.
+# ветку main; конкретный тег (например v0.26.1) пинит версию в обоих случаях.
 # ===========================================================================================
 
 ARG MEOW_VERSION=latest
@@ -107,7 +107,7 @@ RUN set -eux; \
     case "$ref" in \
         v[0-9]*) url="https://codeload.github.com/meow-rs/meow-rs/tar.gz/refs/tags/${ref}" ;; \
         main)   url="https://codeload.github.com/meow-rs/meow-rs/tar.gz/refs/heads/main" ;; \
-        *) echo "MEOW_VERSION=${MEOW_VERSION}: ожидается 'latest' или тег вида v0.22.0" >&2; exit 1 ;; \
+        *) echo "MEOW_VERSION=${MEOW_VERSION}: ожидается 'latest' или тег вида v0.26.1" >&2; exit 1 ;; \
     esac; \
     echo "building meow-rs ${ref} from source"; \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/src.tar.gz "$url"; \
@@ -259,9 +259,9 @@ WORKDIR /etc/mihomo
 
 EXPOSE 1080 9090
 
-# entrypoint.sh заканчивается на "exec mihomo $CMD_MIHOMO", где
-# CMD_MIHOMO="${@:-"-d $WORKDIR -f $WORKDIR/$CONFIG"}" — при пустом CMD
-# контейнер стартует с -d /etc/mihomo -f /etc/mihomo/default_config.yaml.
+# entrypoint.sh сам собирает командную строку ядра: без аргументов это
+# -d /etc/mihomo -f /etc/mihomo/<CONFIG>, а при "-t" без своего -f он
+# подставляет собранный конфиг (иначе meow ищет "config.yaml" и падает).
 # Как и в образе-оригинале, CMD не задан: RouterOS "/container add" без cmd=
 # запускает контейнер в рабочем режиме, а аргументы (например "-v" или "-t")
 # передаются через cmd= для разовых диагностических запусков.
