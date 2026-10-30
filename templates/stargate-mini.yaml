@@ -177,6 +177,10 @@ exclude_ru: &exclude_ru '(?i)🇷🇺|RU'
 # Используется в группах для российского трафика
 filter_ru: &filter_ru '(?i)🇷🇺|RU'
 
+# Типы узлов, исключаемые из авто-групп: wireguard ядром не разбирается,
+# а direct-узел (дополнительный veth) в авто-группе означал бы «прокси = напрямую»
+exclude_wg: &exclude_wg "wireguard|direct"
+
 # ============================================================================
 # === СПИСКИ ПРОКСИ-ГРУПП (ANCHORS) ===
 # ============================================================================
@@ -283,6 +287,7 @@ proxy-groups:
     type: url-test                  # Тестирование скорости
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *url_test                   # Параметры тестирования
 
     # FAILOVER - резервный прокси при отказе основного
@@ -290,6 +295,7 @@ proxy-groups:
     type: fallback                  # Переключение при отказе
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check               # Параметры проверки
 
     # LOADBALANCE - балансировка по нагрузке
@@ -298,6 +304,7 @@ proxy-groups:
     strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check               # Параметры тестирования
     hidden: false                   # Показывать в интерфейсе
 
@@ -333,6 +340,7 @@ proxy-groups:
     type: url-test                  # Тестирование скорости
     use: *providers_list            # Использовать провайдеры
     filter: *filter_ru              # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *url_test                   # Параметры тестирования
 
     # RU_FAILOVER - резервный российский прокси
@@ -340,6 +348,7 @@ proxy-groups:
     type: fallback                  # Переключение при отказе
     use: *providers_list            # Использовать провайдеры
     filter: *filter_ru              # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check               # Параметры проверки
 
     # RU_LOADBALANCE - балансировка по нагрузке
@@ -348,6 +357,7 @@ proxy-groups:
     strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
     use: *providers_list            # Использовать провайдеры
     filter: *filter_ru              # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check               # Параметры тестирования
     hidden: false                   # Показывать в интерфейсе
 

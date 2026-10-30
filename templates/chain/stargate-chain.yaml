@@ -138,6 +138,10 @@ exclude_ru: &exclude_ru "(?i)🇷🇺|RU"
 # Используется в группах для российского трафика
 filter_ru: &filter_ru "(?i)🇷🇺|RU"
 
+# Типы узлов, исключаемые из авто-групп: wireguard ядром не разбирается,
+# а direct-узел (дополнительный veth) в авто-группе означал бы «прокси = напрямую»
+exclude_wg: &exclude_wg "wireguard|direct"
+
 # Источники прокси-серверов (подписки)
 # PROVIDERS_BLOCK - обычные подписки (SUB1, SUB2...)
 # PROVIDERS_CHAIN_BLOCK - цепочки прокси "через Россию"
@@ -166,6 +170,7 @@ url_test: &url_test
   lazy: $HEALTH_CHECK_LAZY                                       # Тестировать сразу при запуске
   expected-status: $HEALTH_CHECK_EXPECTED_STATUS    # Ожидаемый HTTP-статус
   tolerance: $TOLERANCE                                     # Допустимая разница задержки (мс)
+  exclude-type: wireguard                                     # WG-узлы не годятся даже во фронт цепочки
 
 # ============================================================================
 # === СПИСКИ ПРОВАЙДЕРОВ И ФИЛЬТРЫ (ANCHORS) ===
@@ -305,6 +310,7 @@ proxy-groups:
     type: url-test                                    # Тестирование скорости
     use: *providers_list                              # Использовать провайдеры
     exclude-filter: *exclude_ru                       # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *url_test                                     # Параметры тестирования
 
     # FAILOVER - резервный прокси при отказе основного
@@ -312,6 +318,7 @@ proxy-groups:
     type: fallback                                    # Переключение при отказе
     use: *providers_list                              # Использовать провайдеры
     exclude-filter: *exclude_ru                       # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check                                 # Параметры проверки
 
     # LOADBALANCE - балансировка по нагрузке
@@ -320,6 +327,7 @@ proxy-groups:
     strategy: $LOADBALANCE_STRATEGY                   # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
     use: *providers_list                              # Использовать провайдеры
     exclude-filter: *exclude_ru                       # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check                                 # Параметры тестирования
     hidden: false                                     # Показывать в интерфейсе
 
@@ -344,6 +352,7 @@ proxy-groups:
     type: url-test                                    # Тестирование скорости
     use: *providers_list                              # Использовать провайдеры
     filter: *filter_ru                                # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *url_test                                     # Параметры тестирования
 
     # RU_FAILOVER - резервный российский прокси
@@ -351,6 +360,7 @@ proxy-groups:
     type: fallback                                    # Переключение при отказе
     use: *providers_list                              # Использовать провайдеры
     filter: *filter_ru                                # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check                                 # Параметры проверки
 
     # RU_LOADBALANCE - балансировка по нагрузке
@@ -359,6 +369,7 @@ proxy-groups:
     strategy: $LOADBALANCE_STRATEGY                   # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
     use: *providers_list                              # Использовать провайдеры
     filter: *filter_ru                                # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check                                 # Параметры тестирования
     hidden: false                                     # Показывать в интерфейсе
 

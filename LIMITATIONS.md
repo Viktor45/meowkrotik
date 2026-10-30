@@ -289,7 +289,7 @@ mihomo такое имя проходило насквозь, минуя DOMAIN-
 | `GEOSITE` по файлу `.mrs` | работает | Формат MetaCubeX поддерживается |
 | `GEOSITE` по файлу `.dat` | работает | С 0.26 поддерживается **оба** формата: `.mrs` и V2Ray `.dat` (protobuf). Ядро определяет формат по содержимому, а не по расширению |
 | `GEOIP` по нестандартным категориям | нет | Работают только ISO-коды стран через `Country.mmdb`. Категории вида `akamai`, `amazon`, `fastly`, `oracle`, `cloudflare`, `google` (набор ZKEEN) не разрешаются: правило загружается, но **никогда не срабатывает** |
-| `GEOSITE` по нестандартным категориям | нет | В базе MetaCubeX таких категорий нет: `other`, `politic`, `category-ads-all`, `fastly`, `cloudflare` отсутствуют (проверено на свежем `geosite.dat`, 1561 категория). Правило загружается, но **никогда не срабатывает**, ошибки нет |
+| `GEOSITE` по нестандартным категориям | иначе | В базе MetaCubeX категорий `domains`/`other`/`politic` нет — с ней правило грузится, но никогда не срабатывает. С 0.26 ядро читает V2Ray `.dat`, а с 0.27 — ключ `geox-url`: кастомная база (в шаблоне Stargate — ZKEEN, 34 КБ) делает категории рабочими. Категория должна существовать в загруженной базе — проверок нет, отсутствие — та же тихая ловушка |
 | `IN-TYPE` с неизвестным значением | нет | В mihomo такое правило молча не срабатывает, здесь — **предупреждение и отбрасывание правила** (в `strict: true` — ошибка). Допустимы `HTTP`, `HTTPS`, `SOCKS5`, `TPROXY`, `INNER` |
 | Доменные шаблоны вне явных правил (`fake-ip-filter`, `hosts`, `fallback-filter.domain`, домены в `.mrs`) | иначе | С 0.27 семантика как в mihomo: `x.com` — только сам домен, `*.x.com` — ровно одна метка ниже, `.x.com` — поддомены любой глубины, но не `x.com`, `+.x.com` — домен и все поддомены. Конфиги, которые при старой семантике «голый домен = домен с поддоменами», матчат меньше имен: пишите `+.example.com`. `nameserver-policy`-ключи с `*.`/`.` раньше никогда не срабатывали — теперь работают |
 | Имя входа `IN-NAME` для TUN | иначе | Всегда `meow-tun`, а не имя устройства |
@@ -491,6 +491,7 @@ mihomo, а meow-rs на нем либо не стартует, либо стар
 | Блок `iptables:` верхнего уровня | работает | **молча игнорируется**, без предупреждения |
 | Поля TUN `stack`, `strict-route`, `auto-redirect`, `auto-detect-interface`, `endpoint-independent-nat`, `mtu-v6`, `route-address`, `route-exclude-address`, `include-uid`, `exclude-uid` | работают | **игнорируются** с предупреждением (`tun.<поле>: field is not supported in meow-rs and will be ignored`) |
 | `nameserver: system` | системный резолвер | воспринимается как **имя хоста** |
+| `find-process-mode` | включает/выключает поиск процесса | **молча игнорируется**: поиск процесса запускается сам, только когда в правилах есть `PROCESS-NAME` |
 
 Ключ `strict: true` переводит пропуски второй таблицы в ошибки загрузки. Если
 конфиг готовится вручную и важно, чтобы ничего не выпало молча, включайте его
@@ -534,9 +535,9 @@ mihomo, а meow-rs на нем либо не стартует, либо стар
 18. **GEOIP по нестандартным категориям** (ZKEEN: akamai, amazon, fastly,
     oracle, cloudflare, google) — правило загрузится, но никогда не сработает;
     заменить на ipcidr- rule-providers.
-19. **GEOSITE по нестандартным категориям** (ZKEEN: domains/other/politic) —
-    часть отсутствует в базе MetaCubeX, часть есть; заменить на доменные
-    rule-providers.
+19. **GEOSITE по нестандартным категориям** с базой MetaCubeX — таких
+    категорий там нет; нужна кастомная база через `geox-url` (в шаблоне
+    Stargate — ZKEEN `domains`/`other`/`politic`).
 20. **`use:`, `include-all*`, `filter` в группе `relay`** — только явный список
     `proxies:` из двух и более узлов.
 21. **Проверка живости внутри `relay`** — обернуть relay в `fallback` или
@@ -650,7 +651,8 @@ merge-ключей теперь раскрываются.
 - входящий Shadowsocks (`listeners: - type: shadowsocks`) — с 0.27 в релизной
   `full`-сборке;
 - группы `select`, `url-test`, `fallback`, `load-balance` (`round-robin` и
-  `consistent-hashing`) и `relay` для TCP;
+  `consistent-hashing`) и `relay` для TCP; фильтры групп `filter`,
+  `exclude-filter` и `exclude-type` (в том числе на провайдерах);
 - `filter`/`exclude-filter`, `include-all`, `max-failed-times`, `tolerance`,
   прокси- и rule-провайдеры типов `http`, `file` и `inline` (у `inline` — без
   `interval`);

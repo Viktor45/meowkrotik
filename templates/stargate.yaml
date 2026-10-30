@@ -1,7 +1,7 @@
 # ============================================================================
 # ШАБЛОН STARGATE
 # Полная конфигурация ядра meow-rs с расширенными возможностями маршрутизации
-# GEOIP по ISO-кодам стран, доменные списки legiz-ru, CDN-провайдеры по IP
+# GEOIP по ISO-кодам стран, GEOSITE по ZKEEN-базе (через geox-url), CDN-провайдеры по IP
 # Синтаксис (mihomo): https://github.com/MetaCubeX/mihomo/blob/Meta/docs/config.yaml
 # Возможности ядра: https://github.com/meow-rs/meow-rs/blob/main/docs/migration-from-go-mihomo.md
 # Источник: https://raw.githubusercontent.com/Viktor45/meowkrotik/refs/heads/main/templates/stargate.yaml
@@ -78,6 +78,13 @@ profile:
 geodata:
   auto-update: true          # Обновлять геобазы автоматически
   auto-update-interval: 24   # Раз в сутки
+
+# ZKEEN-геосайт: нестандартные категории (domains/other/politic) живут в
+# V2Ray-формате .dat; ядро читает .dat с 0.26, а с 0.27 - и ключ geox-url.
+# Ключ geoip у geox-url ядро игнорирует: GEOIP работает только по MMDB,
+# поэтому CDN-провайдеры ниже остаются ipcidr-списками.
+geox-url:
+  geosite: "https://github.com/jameszeroX/zkeen-domains/releases/latest/download/zkeen.dat"
 
 # ============================================================================
 # === АНАЛИЗ ТРАФИКА (SNIFFER) ===
@@ -191,6 +198,10 @@ exclude_ru: &exclude_ru "(?i)🇷🇺|RU"
 # Регулярное выражение для фильтрации только российских прокси
 # Используется в группах для российского трафика
 filter_ru: &filter_ru "(?i)🇷🇺|RU"
+
+# Типы узлов, исключаемые из авто-групп: wireguard ядром не разбирается,
+# а direct-узел (дополнительный veth) в авто-группе означал бы «прокси = напрямую»
+exclude_wg: &exclude_wg "wireguard|direct"
 
 # ============================================================================
 # === СПИСКИ ПРОКСИ-ГРУПП (ANCHORS) ===
@@ -324,6 +335,7 @@ proxy-groups:
     type: url-test                  # Тестирование скорости
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *url_test                   # Параметры тестирования
 
     # FAILOVER - резервный прокси при отказе основного
@@ -331,6 +343,7 @@ proxy-groups:
     type: fallback                  # Переключение при отказе
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check               # Параметры проверки
 
     # LOADBALANCE - балансировка по нагрузке
@@ -339,6 +352,7 @@ proxy-groups:
     strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check               # Параметры тестирования
     hidden: false                   # Показывать в интерфейсе
 
@@ -374,6 +388,7 @@ proxy-groups:
     type: url-test                  # Тестирование скорости
     use: *providers_list            # Использовать провайдеры
     filter: *filter_ru              # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *url_test                   # Параметры тестирования
 
     # RU_FAILOVER - резервный российский прокси
@@ -381,6 +396,7 @@ proxy-groups:
     type: fallback                  # Переключение при отказе
     use: *providers_list            # Использовать провайдеры
     filter: *filter_ru              # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check               # Параметры проверки
 
     # RU_LOADBALANCE - балансировка по нагрузке
@@ -389,6 +405,7 @@ proxy-groups:
     strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
     use: *providers_list            # Использовать провайдеры
     filter: *filter_ru              # Только российские серверы
+    exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
     <<: *health_check               # Параметры тестирования
     hidden: false                   # Показывать в интерфейсе
 
@@ -829,29 +846,6 @@ rule-providers:
     url: https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/meta/geo/geoip/cloudflare.mrs
     path: ./rule-sets/cdn-cloudflare.mrs
 
-    # --------------------------------------------------------------------------
-    # САЙТЫ, ЗАБЛОКИРОВАННЫЕ В РФ (замена категорий ZKEEN GEOSITE)
-    # --------------------------------------------------------------------------
-  inside-russia:
-    <<: *rule_behavior_domain_mrs
-    url: https://github.com/legiz-ru/mihomo-rule-sets/raw/main/ru-bundle/itdoginfo-inside-russia.mrs
-    path: ./rule-sets/inside-russia.mrs
-
-  no-russia-hosts:
-    <<: *rule_behavior_domain_mrs
-    url: https://github.com/legiz-ru/mihomo-rule-sets/raw/main/ru-bundle/no-russia-hosts.mrs
-    path: ./rule-sets/no-russia-hosts.mrs
-
-  antifilter:
-    <<: *rule_behavior_domain_mrs
-    url: https://github.com/legiz-ru/mihomo-rule-sets/raw/main/ru-bundle/antifilter-community.mrs
-    path: ./rule-sets/antifilter.mrs
-
-  ban-ru:
-    <<: *rule_behavior_domain_mrs
-    url: https://github.com/legiz-ru/mihomo-rule-sets/raw/main/other/category-ban-ru.mrs
-    path: ./rule-sets/ban-ru.mrs
-
   ru-app-list:
     <<: *rule_behavior_classical_yaml
     url: https://github.com/legiz-ru/mihomo-rule-sets/raw/main/other/ru-app-list.yaml
@@ -957,12 +951,11 @@ rules:
   - RULE-SET,ru-app-list,DIRECT
   - GEOIP,RU,Ru-Traffic
 
-    # Сайты, заблокированные в РФ или блокирующие РФ
-    # (вместо нестандартных категорий ZKEEN GEOSITE — доменные списки)
-  - RULE-SET,inside-russia,Other-Domains
-  - RULE-SET,no-russia-hosts,Other-Domains
-  - RULE-SET,antifilter,Other-Domains
-  - RULE-SET,ban-ru,Politic-Domains
+    # Сайты, заблокированные в РФ или блокирующие РФ (категории ZKEEN
+    # из geosite-базы выше; ядро ищет категорию без учета регистра)
+  - GEOSITE,domains,Other-Domains
+  - GEOSITE,other,Other-Domains
+  - GEOSITE,politic,Politic-Domains
 
     # Общий запасной контур для голосовых и игровых портов
   - OR,((DST-PORT,596-599),(DST-PORT,1400),(DST-PORT,3478-3480),(DST-PORT,4379-4380),(DST-PORT,5222),(DST-PORT,5223),(DST-PORT,5228),(DST-PORT,5242),(DST-PORT,6250),(DST-PORT,12000-65535),(DST-PORT,27101-65535),(DST-PORT,45395),(DST-PORT,50318),(DST-PORT,59234)),SELECTOR

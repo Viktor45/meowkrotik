@@ -379,8 +379,11 @@ if grep -Eq '^[[:space:]]*\$TUN_IN_AUTOCONFIG' "$CONFIG_FILE"; then
   # outbound-interface/dns-hijack/udp-timeout. inet4-address — строка (не список).
   # Поля mihomo (stack/strict-route/auto-redirect/auto-detect-interface/
   # disable-icmp-forwarding) ядро принимает с предупреждением и игнорирует.
-  # TUN требует fake-ip DNS (по умолчанию) и root/CAP_NET_ADMIN; в маршруты
-  # заворачивается только fake-ip диапазон.
+  # TUN требует fake-ip DNS (по умолчанию) и root/CAP_NET_ADMIN. С 0.27
+  # auto-route: true — полный перехват: свой трафик контейнера уходит в
+  # устройство через policy rules, а транзитный (форвард с роутера)
+  # остаётся в главной таблице, откуда в устройство попадает, как и раньше,
+  # только fake-ip диапазон.
   # Имя входа TUN для правил IN-NAME в meow-rs всегда "meow-tun".
   TUN_IN_AUTOCONFIG=$(cat <<EOF
 tun:
