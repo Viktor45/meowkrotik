@@ -35,11 +35,22 @@ ARG MEOW_VERSION
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-RUN apk add --no-cache curl ca-certificates
-
-# Скачивание релиза под целевую архитектуру. Стадия всегда идёт на архитектуре
-# хоста ($BUILDPLATFORM), поэтому emulation не нужна даже для arm/v7.
+# Скачивание релиза инструментами базового Alpine — apk add здесь не нужен
+# вовсе: busybox wget умеет HTTPS (ssl_client + ca-certificates-bundle уже в
+# базе), так что стадия состоит из одного слоя. Стадия всегда идёт на
+# архитектуре хоста ($BUILDPLATFORM), поэтому emulation не нужна даже для
+# arm/v7. У busybox wget нет --retry, поэтому ретраи (5 попыток с паузой 5 с,
+# как раньше у curl) делает fetch(); архив качается в файл и только потом
+# распаковывается — обрыв TLS в пайп уронил бы шаг без шанса на повтор.
 RUN set -eux; \
+    fetch() { \
+        i=0; \
+        until wget -q -T 30 -O "$2" "$1"; do \
+            i=$((i+1)); \
+            if [ "$i" -ge 5 ]; then return 1; fi; \
+            sleep 5; \
+        done; \
+    }; \
     case "${TARGETARCH:-amd64}" in \
         amd64) target=x86_64-unknown-linux-musl ;; \
         arm64) target=aarch64-unknown-linux-musl ;; \
@@ -51,21 +62,23 @@ RUN set -eux; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     if [ "$MEOW_VERSION" = "latest" ]; then \
-        asset_url=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 https://api.github.com/repos/meow-rs/meow-rs/releases/latest \
-            | grep "browser_download_url" | cut -d '"' -f 4 \
+        fetch https://api.github.com/repos/meow-rs/meow-rs/releases/latest /tmp/rel.json \
+            || { echo "failed to fetch release info from GitHub API" >&2; exit 1; }; \
+        asset_url=$(grep "browser_download_url" /tmp/rel.json | cut -d '"' -f 4 \
             | grep -- "-${target}\.tar\.gz" | head -n 1); \
         [ -n "$asset_url" ] || { echo "no meow-rs release asset for ${target}" >&2; exit 1; }; \
     else \
         asset_url="https://github.com/meow-rs/meow-rs/releases/download/${MEOW_VERSION}/meow-${MEOW_VERSION}-${target}.tar.gz"; \
     fi; \
     echo "fetching $asset_url"; \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/meow.tar.gz "$asset_url"; \
+    fetch "$asset_url" /tmp/meow.tar.gz \
+        || { echo "download failed after 5 attempts" >&2; exit 1; }; \
     mkdir -p /tmp/meow-extract; \
     tar -xzf /tmp/meow.tar.gz -C /tmp/meow-extract; \
     binary=$(find /tmp/meow-extract -type f -name meow -print -quit); \
     [ -n "$binary" ] || { echo "meow binary not found in the release archive" >&2; exit 1; }; \
     install -m 0755 "$binary" /usr/local/bin/meow; \
-    rm -rf /tmp/meow.tar.gz /tmp/meow-extract
+    rm -rf /tmp/meow.tar.gz /tmp/meow-extract /tmp/rel.json
 
 # ---- Stage 2: рантайм-слой ----------------------------------------------------------------
 
@@ -76,28 +89,29 @@ ARG TARGETPLATFORM
 # Все три архитектуры — musl, база общая. amd64/arm64 получают nftables
 # (маршрутизация в ядре) и gcompat; arm/v7 берёт iptables-legacy, потому что
 # nftables в Alpine для armhf нет. gcompat на arm/v7 не нужен: бинарник
-# статический.
+# статический. --no-cache не оставляет индекса в /var/cache/apk — чистить нечего.
 RUN case "$TARGETPLATFORM" in \
     linux/arm64 | linux/amd64) \
-    apk add --no-cache tini tzdata gcompat nftables envsubst ca-certificates && \
-    rm -rf /var/cache/apk/* ;; \
+    apk add --no-cache tini tzdata gcompat nftables envsubst ca-certificates ;; \
     linux/arm/v7) \
-    apk add --no-cache tini tzdata iptables iptables-legacy envsubst ca-certificates && \
-    rm -rf /var/cache/apk/* ;; \
+    apk add --no-cache tini tzdata iptables iptables-legacy envsubst ca-certificates ;; \
     *) \
     echo "Unsupported platform: $TARGETPLATFORM" >&2; exit 1 ;; \
     esac
 
 # meow-rs совместим с CLI mihomo, но entrypoint.sh вызывает "mihomo";
-# алиас убирает расхождение без правки скрипта.
+# алиас убирает расхождение без правки скрипта. Ссылка и chmod — один слой.
 COPY --from=meow /usr/local/bin/meow /usr/local/bin/meow
-RUN ln -sf /usr/local/bin/meow /usr/local/bin/mihomo
 COPY entrypoint.sh /entrypoint.sh
 COPY default_config.yaml /etc/mihomo/template/default_config.yaml
+RUN ln -sf /usr/local/bin/meow /usr/local/bin/mihomo && chmod +x /entrypoint.sh
 
-RUN chmod +x /entrypoint.sh
-
-ENV CONFIG="default_config.yaml" \
+# Логи ядра без ANSI-цветов: tracing-subscriber красит stdout, даже когда тот
+# не терминал (docker logs, журнал RouterOS), — проверки TTY у него нет.
+# NO_COLOR — стандарт https://no-color.org, его понимает сам fmt-слой
+# библиотеки; вернуть цвета можно, задав NO_COLOR="" в env контейнера.
+ENV NO_COLOR="1" \
+    CONFIG="default_config.yaml" \
     LOG_LEVEL="info" \
     WORKDIR="/etc/mihomo" \
     HEALTH_CHECK_ENABLE="true" \
