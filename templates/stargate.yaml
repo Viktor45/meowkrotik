@@ -35,11 +35,17 @@ unified-delay: $UNIFIED_DELAY
 #  разрешенные DNS для соединений, используя первое успешное соединение.
 tcp-concurrent: $TCP_CONCURRENT
 
-# Максимальное время бездействия TCP Keep Alive
-keep-alive-idle: $KEEP_ALIVE_IDLE
+# Журнал трафика meow (просмотр через GET /traffic/ledger): с 0.29 ядро по
+# умолчанию пишет счётчики по хостам в SQLite <workdir>/traffic/traffic.db и
+# сбрасывает их на диск каждые 60 секунд. Для флеш-накопителя роутера это
+# постоянная запись, поэтому здесь журнал выключен; вернуть - enable: true.
+traffic-ledger: {enable: false}
 
-# Интервал отправки пакетов TCP Keep Alive в секундах
-keep-alive-interval: $KEEP_ALIVE_INTERVAL
+# Журнал событий ядра (просмотр через GET /logbook): по умолчанию ядро пишет
+# обновления провайдеров и прочие события в SQLite <workdir>/logbook/logbook.db
+# (сам чистит: не более 2 МБ и 7 суток). Это регулярная запись на флеш, поэтому
+# здесь журнал выключен вместе с журналом трафика выше; вернуть - enable: true.
+logbook: {enable: false}
 
 # Адрес и порт для управления через веб-интерфейс (например: 0.0.0.0:9090)
 # 0.0.0.0 - слушать все сетевые интерфейсы (доступ из сети)
@@ -806,8 +812,10 @@ rule-providers:
   # misc-ai - список доменов для ИИ и инструментов разработки.
   # Файл лежит в этом же репозитории (rules/ai-dev.yaml) и качается с ветки main,
   # поэтому нужен только интернет, а не локальная копия в rule-sets/.
+  # behavior: domain (а не classical): classical ждёт "TYPE,payload" и молча
+  # отбрасывает голые домены файла.
   misc-ai:
-    <<: *rule_behavior_classical_yaml
+    <<: *rule_behavior_domain_yaml
     url: https://raw.githubusercontent.com/Viktor45/meowkrotik/refs/heads/main/rules/ai-dev.yaml
     path: ./rule-sets/ai-dev.yaml
 

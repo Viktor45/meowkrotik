@@ -16,8 +16,18 @@ log-level: $LOG_LEVEL
 ipv6: $IPV6
 find-process-mode: $FIND_PROCESS_MODE
 tcp-concurrent: $TCP_CONCURRENT
-keep-alive-idle: $KEEP_ALIVE_IDLE
-keep-alive-interval: $KEEP_ALIVE_INTERVAL
+
+# Журнал трафика meow (просмотр через GET /traffic/ledger): с 0.29 ядро по
+# умолчанию пишет счётчики по хостам в SQLite <workdir>/traffic/traffic.db и
+# сбрасывает их на диск каждые 60 секунд. Для флеш-накопителя роутера это
+# постоянная запись, поэтому здесь журнал выключен; вернуть - enable: true.
+traffic-ledger: {enable: false}
+
+# Журнал событий ядра (просмотр через GET /logbook): по умолчанию ядро пишет
+# обновления провайдеров и прочие события в SQLite <workdir>/logbook/logbook.db
+# (сам чистит: не более 2 МБ и 7 суток). Это регулярная запись на флеш, поэтому
+# здесь журнал выключен вместе с журналом трафика выше; вернуть - enable: true.
+logbook: {enable: false}
 
 profile:
   store-selected: $STORE_SELECTED

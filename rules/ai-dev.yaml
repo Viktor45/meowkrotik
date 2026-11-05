@@ -1,11 +1,14 @@
 # Список доменов ИИ-сервисов и инструментов разработчика.
 #
-# Подключается в stargate.yaml как rule-provider misc-ai (behavior: classical)
+# Подключается в stargate.yaml как rule-provider misc-ai (behavior: domain)
 # и отправляется в группу "AI & Разработка". Отдельные провайдеры (openai,
 # anthropic, perplexity, google-gemini, microsoft) берутся из MetaCubeX — здесь
 # то, чего у них нет: консоли разработчика, песочницы, CDN и API-хосты.
 #
-# Формат: Clash classical (payload со списком доменов).
+# Формат: Clash domain (payload со списком доменов; домен матчится точно, без
+# поддоменов - не-covered поддомены перечислены отдельно). Classical тут нельзя:
+# он ждёт строки вида "TYPE,payload" и отбрасывает голые домены с warning'ом
+# "missing payload".
 # Правка: добавьте домен в payload и перезапустите контейнер - провайдер
 # перечитается по своему интервалу (86400 ч, то есть раз в сутки).
 
