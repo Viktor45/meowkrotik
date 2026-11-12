@@ -55,8 +55,8 @@ external-controller: $EXTERNAL_CONTROLLER_ADDRESS:$UI_PORT
 # Если папка существует, интерфейс загрузится оттуда без скачивания
 external-ui: $EXTERNAL_UI_PATH
 
-# Ссылка на архив с интерфейсом в интернете (скачается автоматически при старте)
-# Используется, если локальная папка пуста или отсутствует
+# Ссылка на архив панели: meow-rs запоминает её, но панель не скачивает -
+# на /ui работает встроенная панель, свой UI кладётся в папку external-ui
 external-ui-url: $EXTERNAL_UI_URL
 
 # Секрет API и веб-панели (Bearer); без него панель открыта всей сети
@@ -235,9 +235,9 @@ icon_global: &icon_global https://cdn.jsdelivr.net/gh/Koolson/Qure@master/IconSe
 # ============================================================================
 
 # Комбинации behavior + format для разных типов провайдеров правил
-# ВАЖНО для meow-rs: якоря описаны ПОЛНОСТЬЮ, без вложенных merge-ключей.
-# Парсер meow-rs не разворачивает якорь, внутри которого сам стоит `<<:`
-# (типичный «двухуровневый» якорь) — конфиг падает с missing field `type`.
+# Якоря описаны ПОЛНОСТЬЮ, без вложенных merge-ключей: chained `<<:` ядро
+# разворачивает с 0.27, но полные якоря парсятся одинаково и на 0.22-0.26
+# и читаются без прыжков по файлу.
 rule_behavior_domain_mrs: &rule_behavior_domain_mrs
   type: http
   interval: 86400
@@ -325,7 +325,7 @@ proxy-groups:
     # LOADBALANCE - балансировка по нагрузке
   - name: LOADBALANCE
     type: load-balance              # Балансировка нагрузки
-    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
+    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing)
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
     exclude-type: *exclude_wg     # Без direct-узлов (VETH) и wireguard
@@ -378,7 +378,7 @@ proxy-groups:
     # RU_LOADBALANCE - балансировка по нагрузке
   - name: RU_LOADBALANCE
     type: load-balance              # Балансировка нагрузки
-    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
+    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing)
     use: *providers_list            # Использовать провайдеры
     filter: *filter_ru              # Только российские серверы
     exclude-type: *exclude_wg     # Без direct-узлов (VETH) и wireguard

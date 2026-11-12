@@ -9,6 +9,9 @@ health-check-template: &health-check
 ###########################
 external-controller: $EXTERNAL_CONTROLLER_ADDRESS:$UI_PORT
 external-ui: $EXTERNAL_UI_PATH
+# ссылка на архив панели: meow-rs запоминает её, но панель не скачивает —
+# на /ui работает встроенная панель, а свой UI кладётся в папку EXTERNAL_UI_PATH
+# внутри WORKDIR (см. README)
 external-ui-url: $EXTERNAL_UI_URL
 secret: $UI_SECRET
 unified-delay: $UNIFIED_DELAY
@@ -39,19 +42,38 @@ profile:
 
 dns:
   enable: $DNS_ENABLE
-  use-system-hosts: $DNS_USE_SYSTEM_HOSTS
-  listen: $DNS_LISTEN
   cache-algorithm: $DNS_CACHE_ALGORITHM
   prefer-h3: $DNS_PREFER_H3
+  use-system-hosts: $DNS_USE_SYSTEM_HOSTS
+  listen: $DNS_LISTEN
+  # Bootstrap-резолвер для зашифрованных upstream с именем хоста (например
+  # tls://dns.google в DNS_NAMESERVERS): только IP-литералы и только plain
+  # UDP/TCP — tls:// и имя хоста здесь ядро отвергает. Пусто — bootstrap
+  # поднимается через системный DNS (ядро предупредит).
+  default-nameserver:
+$DNS_DEFAULT_NAMESERVER
   enhanced-mode: $DNS_ENHANCED_MODE
   fake-ip-range: $DNS_FAKE_IP_RANGE
   fake-ip-ttl: $DNS_FAKE_IP_TTL
+  fake-ip-filter-mode: $DNS_FAKE_IP_FILTER_MODE
+  # Домены, которым fake-ip не выдаётся. Разделитель — запятая или |;
+  # кавычки в значениях не нужны, entrypoint отдаёт их в YAML как строки:
+  #   DNS_FAKE_IP_FILTER="*.lan,*.local,+.stun"
+  fake-ip-filter:
+$DNS_FAKE_IP_FILTER
   # meow-rs не поддерживает спец-строку "system" из mihomo — серверы задаются
   # явно через переменную окружения DNS_NAMESERVERS (по умолчанию 1.1.1.1,8.8.8.8):
   #   DNS_NAMESERVERS="1.1.1.1,8.8.8.8,9.9.9.9"
   # entrypoint превращает её в этот YAML-список.
   nameserver:
 $DNS_NAMESERVERS_LIST
+  # Отдельный резолвер для имён прокси-серверов (mihomo proxy-server-nameserver).
+  # Формат как у DNS_NAMESERVERS (запятая или |); только здесь легитимен тег
+  # прокси: plain-сервер — udp://1.1.1.1#SELECTOR, шифрованный — tls://1.1.1.1?proxy=SELECTOR
+  # (на шифрованных "#" — это SNI). Пусто — имена прокси-серверов резолвит
+  # общий nameserver.
+  proxy-server-nameserver:
+$DNS_PROXY_SERVER_NAMESERVER
 
 proxy-providers:
 $PROVIDERS_BLOCK
@@ -65,7 +87,7 @@ proxy-groups:
       - MANUAL
       - LOADBALANCE
       - DIRECT
-  
+
   - name: AUTO
     type: url-test
     use:

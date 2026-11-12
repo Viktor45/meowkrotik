@@ -143,6 +143,7 @@ ENV NO_COLOR="1" \
     DNS_ENHANCED_MODE="fake-ip" \
     DNS_FAKE_IP_RANGE="198.18.0.0/15" \
     DNS_FAKE_IP_TTL=1 \
+    DNS_FAKE_IP_FILTER_MODE="blacklist" \
     TCP_CONCURRENT="true" \
     FIND_PROCESS_MODE="off" \
     STORE_SELECTED="true" \

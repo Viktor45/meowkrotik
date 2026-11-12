@@ -55,8 +55,8 @@ external-controller: $EXTERNAL_CONTROLLER_ADDRESS:$UI_PORT
 # Если папка существует, интерфейс загрузится оттуда без скачивания
 external-ui: $EXTERNAL_UI_PATH
 
-# Ссылка на архив с интерфейсом в интернете (скачается автоматически при старте)
-# Используется, если локальная папка пуста или отсутствует
+# Ссылка на архив панели: meow-rs запоминает её, но панель не скачивает -
+# на /ui работает встроенная панель, свой UI кладётся в папку external-ui
 external-ui-url: $EXTERNAL_UI_URL
 
 # Секрет API и веб-панели (Bearer); без него панель открыта всей сети
@@ -226,7 +226,7 @@ proxy-groups:
     # LOADBALANCE - балансировка по нагрузке
   - name: LOADBALANCE
     type: load-balance              # Балансировка нагрузки
-    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
+    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing)
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
     <<: *health_check               # Параметры тестирования

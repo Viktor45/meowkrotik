@@ -251,6 +251,7 @@ mihomo такое имя проходило насквозь, минуя DOMAIN-
 | Что | Статус | Подробности |
 | :--- | :--- | :--- |
 | `nameserver: system` | нет | Воспринимается как имя хоста. В mihomo это системный резолвер. Нужно указывать серверы явно (переменная `DNS_NAMESERVERS`) |
+| `dns.cache-algorithm` / `dns.prefer-h3` / `dns.fake-ip-ttl` / `dns.respect-rules` / `dns.ipv6` | нет | Ключи **молча игнорируются** (в схеме конфига их нет — без предупреждений): кэш, TTL и логику DNS ядро подстраивает по-своему, `respect-rules` не реализован, IPv6 в DNS определяется верхнеуровневым `ipv6`. В `default_config.yaml` первые три оставлены как паритет с mihomo |
 | DoQ, `nameserver: quic://` | нет | **Жесткая ошибка** загрузки. Заменяется на `tls://` или `https://` |
 | `nameserver: sdns://` | нет | В mihomo — тихий warn-drop, здесь — **жесткая ошибка** |
 | `default-nameserver` с **именем хоста** (`tls://dns.google`, `https://cloudflare-dns.com`, `udp://dns.google`, `dns.google`) | нет | **Жесткая ошибка загрузки**: `default-nameserver entry 'tls://dns.google:853#dns.google' must be a plain UDP/TCP nameserver (tls:// and https:// are not allowed here because they would create a bootstrap loop)`. Текст ошибки вводит в заблуждение — проверяется не транспорт, а наличие имени хоста: `udp://dns.google` отвергается с тем же сообщением. Bootstrap-серверы — только с IP-литералом |
@@ -640,7 +641,6 @@ merge-ключей теперь раскрываются; «мёртвые» д�
   отвечают `enabled: false`, история в панели недоступна, зато диск в простое
   не пишется вовсе. Вернуть можно, убрав секцию (или поставив
   `enable: true`).
-- **Журнал трафика выключен в шаблонах** — см. пункт про журналы ядра выше.
 - **`ui`-панель и API на одном порту.** Это совпадает с mihomo, ничего нового.
 
 ## Что ограничением не является

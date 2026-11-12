@@ -55,8 +55,8 @@ external-controller: $EXTERNAL_CONTROLLER_ADDRESS:$UI_PORT
 # Если папка существует, интерфейс загрузится оттуда без скачивания
 external-ui: $EXTERNAL_UI_PATH
 
-# Ссылка на архив с интерфейсом в интернете (скачается автоматически при старте)
-# Используется, если локальная папка пуста или отсутствует
+# Ссылка на архив панели: meow-rs запоминает её, но панель не скачивает -
+# на /ui работает встроенная панель, свой UI кладётся в папку external-ui
 external-ui-url: $EXTERNAL_UI_URL
 
 # Секрет API и веб-панели (Bearer); без него панель открыта всей сети
@@ -69,18 +69,15 @@ profile:
 # === ГЕОДАННЫЕ ===
 # ============================================================================
 
-# Секция geodata: — формат meow-rs. Поля mihomo (geodata-mode, geox-url,
-# geo-auto-update, geo-update-interval) ядро игнорирует, а списки ZKEEN
-# (.dat с нестандартными категориями akamai/amazon/domains/…) meow-rs не
-# читает: GEOIP работает только по ISO-кодам стран, GEOSITE — по базе
-# MetaCubeX. Поэтому:
-#   * GEOIP,RU — штатная геобаза стран (скачивается автоматически);
+# Секция geodata: — формат meow-rs. Поля mihomo (geodata-mode,
+# geo-auto-update, geo-update-interval) ядро игнорирует; GEOIP работает
+# только по MMDB с ISO-кодами стран. Поэтому:
+#   * GEOIP,RU — штатная геобаза стран (Country.mmdb);
 #   * CDN и облака — отдельными ipcidr rule-providers (см. rule-providers ниже);
-#   * сайты, заблокированные в РФ, — доменными списками legiz-ru.
-# Из геобаз шаблону нужна только Country.mmdb: единственное GEOIP-правило
-# здесь RU, а с 0.27 ядро качает лишь базы, на которые ссылается конфиг, -
-# ASN и geosite не скачиваются вовсе. Ежесуточный тик обновляет только
-# фоновые базы; Country.mmdb скачивается, только если файла нет.
+#   * сайты, заблокированные в РФ, — ZKEEN-геосайтом через geox-url (см. ниже).
+# С 0.27 ядро качает лишь базы, на которые ссылается конфиг: здесь это одна
+# Country.mmdb плюс zkeen.dat. Фоновый тик обновляет только zkeen.dat,
+# Country.mmdb — только если файла нет.
 geodata:
   auto-update: true          # Обновлять геобазы автоматически
   auto-update-interval: 24   # Раз в сутки
@@ -265,9 +262,9 @@ icon_puzzle: &icon_puzzle https://cdn.jsdelivr.net/gh/Koolson/Qure@master/IconSe
 # ============================================================================
 
 # Комбинации behavior + format для разных типов провайдеров правил
-# ВАЖНО для meow-rs: якоря описаны ПОЛНОСТЬЮ, без вложенных merge-ключей.
-# Парсер meow-rs не разворачивает якорь, внутри которого сам стоит `<<:`
-# (типичный «двухуровневый» якорь) — конфиг падает с missing field `type`.
+# Якоря описаны ПОЛНОСТЬЮ, без вложенных merge-ключей: chained `<<:` ядро
+# разворачивает с 0.27, но полные якоря парсятся одинаково и на 0.22-0.26
+# и читаются без прыжков по файлу.
 rule_behavior_domain_mrs: &rule_behavior_domain_mrs
   type: http
   interval: 86400
@@ -355,7 +352,7 @@ proxy-groups:
     # LOADBALANCE - балансировка по нагрузке
   - name: LOADBALANCE
     type: load-balance              # Балансировка нагрузки
-    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
+    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing)
     use: *providers_list            # Использовать провайдеры
     exclude-filter: *exclude_ru     # Исключить российские серверы
     exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
@@ -408,7 +405,7 @@ proxy-groups:
     # RU_LOADBALANCE - балансировка по нагрузке
   - name: RU_LOADBALANCE
     type: load-balance              # Балансировка нагрузки
-    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing, sticky-sessions)
+    strategy: $LOADBALANCE_STRATEGY # Стратегия балансировки (round-robin, consistent-hashing)
     use: *providers_list            # Использовать провайдеры
     filter: *filter_ru              # Только российские серверы
     exclude-type: *exclude_wg   # Без direct-узлов (VETH) и wireguard
@@ -466,7 +463,7 @@ proxy-groups:
     include-all: false              # Только указанные прокси
     proxies: *proxy_list_all        # Список доступных опций
 
-    # ECH-REFILTER - трафик для ускорения интернета с ECH
+    # ECH-REFILTER - не-ECH трафик по спискам re-filter; ECH-домены идут напрямую (DIRECT)
   - name: ECH-Refilter
     type: select                    # Ручной выбор
     icon: *icon_direct
@@ -648,7 +645,7 @@ proxy-groups:
     include-all: false              # Только указанные прокси
     proxies: *proxy_list_all        # Список доступных опций
 
-    # OTHER-DOMAINS - домены из списков legiz-ru (inside-russia, no-russia-hosts, antifilter)
+    # OTHER-DOMAINS - прочие домены, заблокированные в РФ: GEOSITE,domains и GEOSITE,other из ZKEEN-базы
   - name: Other-Domains
     type: select                    # Ручной выбор
     icon: *icon_puzzle
@@ -753,7 +750,7 @@ rule-providers:
     url: https://github.com/MetaCubeX/meta-rules-dat/raw/meta/geo/geosite/youtube.mrs
     path: ./rule-sets/youtube.mrs
 
-    # Re-filter - правила для ускорения интернета с ECH
+    # Re-filter - списки legiz-ru, разделяющие трафик с ECH и без
   refilter-noech:
     <<: *rule_behavior_domain_mrs
     url: https://github.com/legiz-ru/mihomo-rule-sets/raw/main/re-filter/re-filter-noech.mrs
@@ -943,7 +940,7 @@ rules:
   - RULE-SET,cdn-google,GOOGLE
   - RULE-SET,cdn-cloudflare,CLOUDFLARE
 
-    # Правила для ускорения интернета с ECH
+    # Правила re-filter: ECH-домены напрямую, остальное - через ECH-Refilter
   - DOMAIN,cloudflare-ech.com,SELECTOR
   - RULE-SET,refilter-ech,DIRECT
   - RULE-SET,refilter-noech,ECH-Refilter
