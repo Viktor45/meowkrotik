@@ -107,7 +107,7 @@ FROM --platform=$BUILDPLATFORM alpine:latest AS panel
 #                      RouterOS смонтирован поверх /etc/mihomo
 #                      (/container mounts add dst=/etc/mihomo), поэтому
 #                      запечённый /etc/mihomo/zui под маунтом не виден, а
-#                      ядро без папки external-ui отдаёт /ui как 404 —
+#                      ядро без папки external-ui отдаёт /ui/ как 404 —
 #                      fallback на встроенный дашборд в этом случае нет.
 #                      entrypoint.sh разворачивает архив в рабочий каталог,
 #                      когда папки панели там нет.
