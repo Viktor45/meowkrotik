@@ -54,7 +54,7 @@ logbook: {enable: false}
 external-controller: $EXTERNAL_CONTROLLER_ADDRESS:$UI_PORT
 
 # Папка с веб-интерфейсом: панель zashboard запечена в образ, entrypoint
-# разворачивает её сюда, если папки нет; панель раздаётся по /ui
+# разворачивает её сюда, если папки нет; панель раздаётся по /ui/
 external-ui: $EXTERNAL_UI_PATH
 
 # Ссылка на архив панели: meow-rs её не скачивает - панель zashboard уже
