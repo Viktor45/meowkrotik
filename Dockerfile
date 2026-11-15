@@ -24,6 +24,13 @@
 # Переменная сборки MEOW_VERSION выбирает версию meow-rs: latest (по умолчанию)
 # резолвит новейший релиз через GitHub API для всех трёх архитектур, конкретный
 # тег (например v0.29.0) скачивает его архив напрямую.
+#
+# Вместе с ядром в образ запекается веб-панель zashboard: стадия panel
+# скачивает релизный архив dist-no-fonts.zip, распакованное содержимое кладётся
+# в /etc/mihomo/zui (по умолчанию на неё указывает external-ui), запасной архив
+# /opt/zui.tar.gz остаётся вне /etc/mihomo — рабочий каталог RouterOS смонтирован
+# поверх этой папки, и entrypoint.sh разворачивает панель из архива, когда
+# затенённый маунтом /etc/mihomo/zui не виден. Подробности в комментарии стадии.
 # ===========================================================================================
 
 ARG MEOW_VERSION=latest
@@ -80,7 +87,77 @@ RUN set -eux; \
     install -m 0755 "$binary" /usr/local/bin/meow; \
     rm -rf /tmp/meow.tar.gz /tmp/meow-extract /tmp/rel.json
 
-# ---- Stage 2: рантайм-слой ----------------------------------------------------------------
+# ---- Stage 2: панель zashboard -------------------------------------------------------------
+
+FROM --platform=$BUILDPLATFORM alpine:latest AS panel
+
+# Дашборд скачивается релизным архивом Zephyruso/zashboard (dist-no-fonts.zip —
+# без шрифтов) и распаковывается без apk add: busybox unzip и tar есть в базе.
+# Архив пишется в файл до распаковки и качается тем же fetch()-циклом, что и
+# бинарник meow-rs (у busybox wget нет --retry). Записи zip лежат под верхним
+# каталогом dist/ — содержимое берётся оттуда, если он есть: index.html обязан
+# оказаться прямо в корне папки панели, как это делает и собственная
+# распаковка meow-rs (external_ui.rs срезает общий верхний каталог).
+#
+# Результат стадии — две копии:
+#   /zui            -> COPY в рантайм как /etc/mihomo/zui: панель по адресу, на
+#                      который указывает external-ui (EXTERNAL_UI_PATH=zui,
+#                      дефолт задаёт entrypoint.sh);
+#   /opt/zui.tar.gz -> запасной архив ВНЕ /etc/mihomo. Рабочий каталог
+#                      RouterOS смонтирован поверх /etc/mihomo
+#                      (/container mounts add dst=/etc/mihomo), поэтому
+#                      запечённый /etc/mihomo/zui под маунтом не виден, а
+#                      ядро без папки external-ui отдаёт /ui как 404 —
+#                      fallback на встроенный дашборд в этом случае нет.
+#                      entrypoint.sh разворачивает архив в рабочий каталог,
+#                      когда папки панели там нет.
+#
+# После распаковки бандл панели правится: zashboard зашивает capability-флаги
+# в минифицированный код по строке /version и считает любой mihomo-совместимый
+# бэкенд полноценным mihomo — а meow-rs не реализует POST /upgrade*,
+# /restart, /configs/geo и /storage (все отвечают 404, см. LIMITATIONS.md).
+# Без правки панель показывает «Обновить ядро», «Перезапустить ядро»,
+# «Обновить GEO», «Обновить панель» и синк настроек, и каждая кнопка падает
+# с ошибкой. sed выключает шесть флагов capability-карты (coreUpgrade,
+# coreRestart, dashboardUpgrade, updateGeoDatabase, syncSettings,
+# coreUpdateCheck — последний ещё и останавливает опрос GitHub об обновлениях,
+# включенный по умолчанию). Что остаётся рабочим: latency-тесты, PUT /configs,
+# PATCH /configs (mode/log-level/tun), переключение групп.
+# Патч ведётся по стабильным ключам карты, а не по минифицированным переменным;
+# у каждого ключа ровно одно вхождение вида "ключ:идентификатор,". Если
+# апстрим переформирует карту и sed не сработает, проверка ниже уронит сборку —
+# кнопки не возвращаются молча.
+RUN set -eux; \
+    fetch() { \
+        i=0; \
+        until wget -q -T 30 -O "$2" "$1"; do \
+            i=$((i+1)); \
+            if [ "$i" -ge 5 ]; then return 1; fi; \
+            sleep 5; \
+        done; \
+    }; \
+    fetch https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip /tmp/zui.zip \
+        || { echo "panel download failed after 5 attempts" >&2; exit 1; }; \
+    mkdir -p /tmp/zui-src; \
+    unzip -q /tmp/zui.zip -d /tmp/zui-src; \
+    if [ -d /tmp/zui-src/dist ]; then src=/tmp/zui-src/dist; else src=/tmp/zui-src; fi; \
+    mkdir -p /zui /opt; \
+    cp -a "$src/." /zui/; \
+    sed -E -i \
+        -e 's/coreUpgrade:[a-zA-Z_$][a-zA-Z0-9_$]*,/coreUpgrade:!1,/' \
+        -e 's/coreRestart:[a-zA-Z_$][a-zA-Z0-9_$]*,/coreRestart:!1,/' \
+        -e 's/dashboardUpgrade:[a-zA-Z_$][a-zA-Z0-9_$]*,/dashboardUpgrade:!1,/' \
+        -e 's/updateGeoDatabase:[a-zA-Z_$][a-zA-Z0-9_$]*,/updateGeoDatabase:!1,/' \
+        -e 's/syncSettings:[a-zA-Z_$][a-zA-Z0-9_$]*,/syncSettings:!1,/' \
+        -e 's/coreUpdateCheck:[a-zA-Z_$][a-zA-Z0-9_$]*,/coreUpdateCheck:!1,/' \
+        /zui/assets/*.js; \
+    for flag in coreUpgrade coreRestart dashboardUpgrade updateGeoDatabase syncSettings coreUpdateCheck; do \
+        grep -rlq "${flag}:!1" /zui/assets || { echo "zashboard patch did not apply: ${flag}" >&2; exit 1; }; \
+    done; \
+    tar -czf /opt/zui.tar.gz -C /zui .; \
+    rm -rf /tmp/zui.zip /tmp/zui-src
+
+# ---- Stage 3: рантайм-слой ----------------------------------------------------------------
 
 FROM alpine:latest AS runtime
 
@@ -102,6 +179,10 @@ RUN case "$TARGETPLATFORM" in \
 # meow-rs совместим с CLI mihomo, но entrypoint.sh вызывает "mihomo";
 # алиас убирает расхождение без правки скрипта. Ссылка и chmod — один слой.
 COPY --from=meow /usr/local/bin/meow /usr/local/bin/meow
+# Панель zashboard из стадии panel: распакованные файлы — по адресу
+# external-ui, запасной архив — вне /etc/mihomo для смонтированного каталога.
+COPY --from=panel /zui /etc/mihomo/zui
+COPY --from=panel /opt/zui.tar.gz /opt/zui.tar.gz
 COPY entrypoint.sh /entrypoint.sh
 COPY default_config.yaml /etc/mihomo/template/default_config.yaml
 RUN ln -sf /usr/local/bin/meow /usr/local/bin/mihomo && chmod +x /entrypoint.sh
@@ -131,7 +212,6 @@ ENV NO_COLOR="1" \
     TUN_AUTO_DETECT_INTERFACE="true" \
     TUN_AUTO_ROUTE="true" \
     TUN_DISABLE_ICMP_FORWARDING="true" \
-    EXTERNAL_UI_PATH="ui" \
     IPV6="true" \
     IP_VERSION="dual" \
     PROVIDER_INTERVAL=3600 \

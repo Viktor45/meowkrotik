@@ -114,12 +114,25 @@ else
   fi
 fi    
 
-# смена веб панели при замене ссылки на её загрузку
-UI_URL_CHECK="$WORKDIR/.ui_url"
-LAST_UI_URL=$(cat "$UI_URL_CHECK" 2>/dev/null)
-if [[ "$EXTERNAL_UI_URL" != "$LAST_UI_URL" ]]; then
-  rm -rf "$WORKDIR/$EXTERNAL_UI_PATH"
-  echo "$EXTERNAL_UI_URL" > "$UI_URL_CHECK"
+# Панель zashboard запечена в образ (/etc/mihomo/zui) и по умолчанию
+# EXTERNAL_UI_PATH указывает на неё: ядро раздаёт её файлы по /ui. Дефолт
+# живёт здесь, а не в Dockerfile ENV, и подставляется только если переменная
+# вовсе не задана - пустое значение остаётся пустым и отключает панель (тогда
+# по /ui отвечает встроенный дашборд meow-rs).
+EXTERNAL_UI_PATH="${EXTERNAL_UI_PATH-zui}"
+export EXTERNAL_UI_PATH
+
+# Папку панели разворачиваем в рабочий каталог, если её там нет. Случай
+# RouterOS: рабочий каталог смонтирован поверх /etc/mihomo
+# (/container mounts add dst=/etc/mihomo), и запечённый zui под маунтом
+# не виден, а ядро без папки external-ui отдаёт /ui как 404 - fallback
+# на встроенный дашборд в этом случае нет. Поэтому запасной архив
+# /opt/zui.tar.gz лежит вне точки монтирования. Уже существующая папка
+# не трогается: пользовательская панель не затирается.
+if [ -n "$EXTERNAL_UI_PATH" ] && [ ! -d "$WORKDIR/$EXTERNAL_UI_PATH" ] && [ -f /opt/zui.tar.gz ]; then
+  log "Unpacking UI panel into $WORKDIR/$EXTERNAL_UI_PATH"
+  mkdir -p "$WORKDIR/$EXTERNAL_UI_PATH"
+  tar -xzf /opt/zui.tar.gz -C "$WORKDIR/$EXTERNAL_UI_PATH"
 fi
 
 # список DNS-серверов для шаблонов: DNS_NAMESERVERS="1.1.1.1,8.8.8.8,9.9.9.9"

@@ -9,9 +9,9 @@ health-check-template: &health-check
 ###########################
 external-controller: $EXTERNAL_CONTROLLER_ADDRESS:$UI_PORT
 external-ui: $EXTERNAL_UI_PATH
-# ссылка на архив панели: meow-rs запоминает её, но панель не скачивает —
-# на /ui работает встроенная панель, а свой UI кладётся в папку EXTERNAL_UI_PATH
-# внутри WORKDIR (см. README)
+# ссылка на архив панели: meow-rs её не скачивает - панель zashboard уже
+# встроена в образ и раздаётся по /ui; пустой EXTERNAL_UI_PATH включает
+# встроенный дашборд meow-rs
 external-ui-url: $EXTERNAL_UI_URL
 secret: $UI_SECRET
 unified-delay: $UNIFIED_DELAY
