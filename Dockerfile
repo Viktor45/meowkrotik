@@ -163,15 +163,22 @@ FROM alpine:latest AS runtime
 
 ARG TARGETPLATFORM
 
-# Все три архитектуры — musl, база общая. amd64/arm64 получают nftables
-# (маршрутизация в ядре) и gcompat; arm/v7 берёт iptables-legacy, потому что
-# nftables в Alpine для armhf нет. gcompat на arm/v7 не нужен: бинарник
-# статический. --no-cache не оставляет индекса в /var/cache/apk — чистить нечего.
+# Все три архитектуры — musl, база общая. Файрвол нужен в двух видах: nftables
+# (когда в ядре есть модуль nf_tables) и iptables (когда нет — nft в ядре без
+# nf_tables не работает). Оба бэкенда запекаются в образ: доустанавливать их
+# на старте нельзя — сети на роутере может не быть, а без правил перехвата
+# трафик LAN идёт мимо прокси. iptables-legacy нужен потому, что nft-бэкенд
+# iptables в ядре без nf_tables падает с "can't initialize ip_tables" и не
+# создаёт ни одного правила; entrypoint.sh переключает ссылки на legacy в
+# соответствующей ветке. gcompat ставится только на amd64/arm64, на arm/v7
+# бинарник статический и он не нужен.
+#
+# --no-cache не оставляет индекса в /var/cache/apk — чистить нечего.
 RUN case "$TARGETPLATFORM" in \
     linux/arm64 | linux/amd64) \
-    apk add --no-cache tini tzdata gcompat nftables envsubst ca-certificates ;; \
+    apk add --no-cache tini tzdata gcompat nftables iptables iptables-legacy envsubst ca-certificates ;; \
     linux/arm/v7) \
-    apk add --no-cache tini tzdata iptables iptables-legacy envsubst ca-certificates ;; \
+    apk add --no-cache tini tzdata nftables iptables iptables-legacy envsubst ca-certificates ;; \
     *) \
     echo "Unsupported platform: $TARGETPLATFORM" >&2; exit 1 ;; \
     esac

@@ -1,52 +1,66 @@
 #!/bin/sh
 sleep 1
 
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
 if [ -f /etc/alpine-release ]; then
     OS="alpine"
 else
     OS="other"
 fi
 
-lsmod | grep -q '^nf_tables' && NFT_CORE=1 || NFT_CORE=0
+# Есть ли в ядре модуль nf_tables. На RouterOS /proc/modules недоступен или
+# пуст — lsmod ничего не печатает, и ветка считается «nftables нет».
+lsmod 2>/dev/null | grep -q '^nf_tables' && NFT_CORE=1 || NFT_CORE=0
 
-if [ "$OS" = "alpine" ]; then
-  # если в системе нет модуля nftables или принудительно хотим использовать iptables
-  if [ "${IPTABLES:-0}" -eq 1 ] || [ $NFT_CORE -eq 0 ]; then
-      # удалить nftables если есть
-      apk info -e nftables >/dev/null 2>&1 && apk del nftables >/dev/null 2>&1
-      # установить iptables если отсутствуют
-      apk info -e iptables >/dev/null 2>&1 || apk add iptables
-      # установить iptables-legacy если отсутствует и исправить символьные ссылки
-      if ! apk info -e iptables-legacy >/dev/null 2>&1; then
-        apk add iptables-legacy
-        # IPv4
-        rm -f /usr/sbin/iptables /usr/sbin/iptables-save /usr/sbin/iptables-restore
-        ln -s /usr/sbin/iptables-legacy         /usr/sbin/iptables
-        ln -s /usr/sbin/iptables-legacy-save    /usr/sbin/iptables-save
-        ln -s /usr/sbin/iptables-legacy-restore /usr/sbin/iptables-restore
-        # IPv6
-        rm -f /usr/sbin/ip6tables /usr/sbin/ip6tables-save /usr/sbin/ip6tables-restore
-        ln -s /usr/sbin/ip6tables-legacy         /usr/sbin/ip6tables
-        ln -s /usr/sbin/ip6tables-legacy-save    /usr/sbin/ip6tables-save
-        ln -s /usr/sbin/ip6tables-legacy-restore /usr/sbin/ip6tables-restore
-      fi
-  # если в системе есть модуль nftables
+# Бэкенд файрвола: nft, если в ядре есть модуль nf_tables и пользователь не
+# принудил iptables; иначе — iptables (в ядре без nf_tables nft не работает).
+if [ "${IPTABLES:-0}" -eq 1 ] || [ $NFT_CORE -eq 0 ]; then
+  FW=iptables
+else
+  FW=nft
+fi
+log "Файрвол: $FW (модуль nf_tables в ядре: $NFT_CORE)"
+
+# Пакеты файрвола запечены в образ (nftables + iptables + iptables-legacy):
+# доустанавливать их на старте не нужно, сети на роутере может не быть.
+# В ветке iptables работаем legacy-бэкендом: nft-бэкенд iptables в ядре без
+# nf_tables падает с "can't initialize ip_tables" и не создаёт ни одного
+# правила. Ссылки создаются всегда, а не только после установки пакета: если
+# iptables-legacy уже был в образе, apk их не создавал, и iptables оставался
+# nft-бэкендом — ровно тот случай, из-за которого правил не было.
+if [ "$OS" = "alpine" ] && [ "$FW" = "iptables" ]; then
+  if [ ! -x /usr/sbin/iptables-legacy ]; then
+    apk add --no-cache iptables-legacy >/dev/null 2>&1 || true
+  fi
+  if [ -x /usr/sbin/iptables-legacy ]; then
+    rm -f /usr/sbin/iptables /usr/sbin/iptables-save /usr/sbin/iptables-restore
+    ln -s /usr/sbin/iptables-legacy         /usr/sbin/iptables
+    ln -s /usr/sbin/iptables-legacy-save    /usr/sbin/iptables-save
+    ln -s /usr/sbin/iptables-legacy-restore /usr/sbin/iptables-restore
+    rm -f /usr/sbin/ip6tables /usr/sbin/ip6tables-save /usr/sbin/ip6tables-restore
+    ln -s /usr/sbin/ip6tables-legacy         /usr/sbin/ip6tables
+    ln -s /usr/sbin/ip6tables-legacy-save    /usr/sbin/ip6tables-save
+    ln -s /usr/sbin/ip6tables-legacy-restore /usr/sbin/ip6tables-restore
   else
-      export DISABLE_NFTABLES=0
-      # удалить iptables и legacy если есть
-      if apk info -e iptables iptables-legacy >/dev/null 2>&1; then
-        apk del iptables iptables-legacy >/dev/null 2>&1
-      fi
-      # установить nftables если отсутствует
-      apk info -e nftables >/dev/null 2>&1 || apk add nftables
+    log "ОШИБКА: iptables-legacy недоступен — перехват трафика невозможен"
   fi
 fi
 
 # настроить маскарад
-if [ "${IPTABLES:-0}" -eq 0 ] && [ $NFT_CORE -eq 1 ]; then
+if [ "$FW" = "nft" ]; then
   nft add table ip nat
   nft add chain ip nat postrouting { type nat hook postrouting priority srcnat \; }
   nft add rule ip nat postrouting meta oiftype ether ip daddr != { 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255} masquerade
+else
+  # legacy-бэкенд не принимает несколько -d в одном правиле ("multiple
+  # --destination options not allowed"), поэтому исключения — отдельными
+  # правилами с RETURN
+  iptables -t nat -A POSTROUTING -d 127.0.0.0/8 -j RETURN
+  iptables -t nat -A POSTROUTING -d 169.254.0.0/16 -j RETURN
+  iptables -t nat -A POSTROUTING -d 224.0.0.0/4 -j RETURN
+  iptables -t nat -A POSTROUTING -d 255.255.255.255/32 -j RETURN
+  iptables -t nat -A POSTROUTING -j MASQUERADE
 fi
 
 FIRST_IFACE=$(ip -o link show | awk -F': ' '/link\/ether/ {print $2; exit}' | cut -d@ -f1)
@@ -67,6 +81,20 @@ LOCAL_IPS=$(
     ' <(ip -o link show) - \
   | paste -sd, -
 )
+# тот же список через пробел — для iptables, где каждый адрес отдельным -d
+LOCAL_IPS_LIST=$(echo "$LOCAL_IPS" | tr ',' ' ')
+
+# Адрес контейнера на входящем интерфейсе. Перенаправление (nat DNAT) меняет
+# адрес назначения именно на него, и tproxy-слушатель обязан быть привязан к
+# тому же адресу: сокет на 127.0.0.1 перенаправленный поток не примет.
+TPROXY_IP=$(ip -4 -o addr show scope global dev "$FIRST_IFACE" 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print a[1]}')
+if [ -z "$TPROXY_IP" ]; then
+  TPROXY_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print a[1]}')
+fi
+if [ -z "$TPROXY_IP" ]; then
+  TPROXY_IP="127.0.0.1"
+  log "ОШИБКА: у контейнера нет IPv4-адреса — перехват трафика работать не будет"
+fi
 
 # удалить ранние main/default for ros = 7.22
 ip rule | awk '
@@ -85,8 +113,6 @@ mkdir -p "$TEMPLATE_DIR" "$USER_SH_DIR"
 DEFAULT_CONFIG_FILE="/etc/mihomo/template/default_config.yaml"
 TEMPLATE_FILE="$TEMPLATE_DIR/$CONFIG"
 BACKUP_PATH="$TEMPLATE_DIR/default_config_old.yaml"
-
-log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # если не указано имя кастомного конфига, используем и актуализируем default
 if [ "$CONFIG" = "default_config.yaml" ]; then
@@ -411,29 +437,76 @@ EOF
   fi
 fi
 
+# Правила перехвата LAN-трафика tproxy-слушателем.
+#
+# mihomo создаёт такие правила сам (sing-tun, auto-redirect). В meow-rs поля
+# auto-redirect нет вовсе (warn-dropped), а tproxy-слушатель с firewall: false
+# правил не создаёт — собираем их здесь, иначе трафик LAN не перехватывается
+# ничем.
+#
+# Механизм доставки трафика в tproxy-слушатель meow-rs (docs/tproxy-gateway.md):
+#   * TCP — nat DNAT. TCP-сокет слушателя у meow-rs НЕ IP_TRANSPARENT (в
+#     отличие от mihomo), поэтому mangle TPROXY для TCP не срабатывает; исходный
+#     адрес meow восстанавливает через SO_ORIGINAL_DST — это conntrack-NAT,
+#     то есть нужен nat DNAT/REDIRECT.
+#   * UDP — mangle TPROXY. UDP-сокет у meow-rs IP_TRANSPARENT, исходный адрес
+#     приходит в IP_RECVORIGDSTADDR; пакет нужно доставить локально, поэтому
+#     дополнительно fwmark + policy routing.
+#
+# Перенаправление идёт на адрес контейнера ($TPROXY_IP): nat DNAT меняет адрес
+# назначения на заданный, и слушатель обязан быть привязан к тому же адресу.
+#
+# Правила — только IPv4: UDP-путь meow-rs работает на IP_RECVORIGDSTADDR, то
+# есть только для IPv4; IPv6-трафик идёт мимо прокси напрямую (как и в ветке
+# iptables, где ip6tables в правилах не участвует).
+
+# --- общие параметры перехвата ---
+TPROXY_PORT=15123
+TPROXY_MARK=0x123
+TPROXY_TABLE=100
+
+# Правило, которое не применилось (нет xt_TPROXY/xt_addrtype в ядре), не должно
+# ронять остальные: теряется UDP или исключение локальных адресов, но TCP
+# (nat DNAT) продолжает работать.
+fw_run() {
+  fw_err=$("$@" 2>&1) || log "Файрвол: правило не применилось ($*): $(echo "$fw_err" | tr '\n' ' ')"
+}
+
+# Исключение локальных адресов из перехвата: трафик к DNS/API/панели самого
+# контейнера ушёл бы в прокси по кругу. xt_addrtype есть не в каждом ядре —
+# при его отсутствии адреса контейнера перечисляются явно.
+iptables_skip_local() {
+  if iptables -t "$1" -A "$2" -m addrtype --dst-type LOCAL -j RETURN 2>/dev/null; then
+    return 0
+  fi
+  iptables -t "$1" -A "$2" -d 127.0.0.0/8 -j RETURN
+  for fw_ip in $LOCAL_IPS_LIST; do
+    iptables -t "$1" -A "$2" -d "$fw_ip" -j RETURN
+  done
+}
+
 # правила nft для настройки tproxy
 nft_rules() {
-  TPROXY_PORT=15123
-  TPROXY_MARK=0x123
-  TPROXY_TABLE=100
+  nft delete table inet tproxy_ci >/dev/null 2>&1
+  nft delete table ip tproxy_nat >/dev/null 2>&1
 
- # --- nftables table ---
-  nft add table inet tproxy_ci
+  # --- nftables table ---
+  fw_run nft add table inet tproxy_ci
 
   # --- divert chain для ускорения TCP ---
-  nft "add chain inet tproxy_ci divert {
+  fw_run nft "add chain inet tproxy_ci divert {
     type filter hook prerouting priority mangle - 5;
     policy accept;
   }"
 
   # --- socket transparent (ускоряет established TCP) ---
-  nft add rule inet tproxy_ci divert \
+  fw_run nft add rule inet tproxy_ci divert \
     meta l4proto tcp socket transparent 1 \
     meta mark set $TPROXY_MARK \
     accept
 
   # --- prerouting (mangle, но не слишком рано) ---
-  nft "add chain inet tproxy_ci prerouting {
+  fw_run nft "add chain inet tproxy_ci prerouting {
     type filter hook prerouting priority mangle;
     policy accept;
   }"
@@ -441,45 +514,66 @@ nft_rules() {
   # --- исключаем все локальные сервисы и служебные адреса ---
   if ! nft add rule inet tproxy_ci prerouting fib daddr type { local, broadcast, multicast } return 2>/dev/null; then
     # for ros < 7.22
-    nft add rule inet tproxy_ci prerouting ip daddr { 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255, $LOCAL_IPS } return
+    fw_run nft add rule inet tproxy_ci prerouting ip daddr { 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255, $LOCAL_IPS } return
   fi
 
   # --- защита от MPTCP ---
-  nft add rule inet tproxy_ci prerouting tcp option mptcp exists drop
+  fw_run nft add rule inet tproxy_ci prerouting tcp option mptcp exists drop
 
-  # --- TPROXY ---
-  nft add rule inet tproxy_ci prerouting \
+  # --- UDP прямо на порт слушателя — это бесконечный цикл «прокси → сам себя» ---
+  fw_run nft add rule inet tproxy_ci prerouting ip daddr $TPROXY_IP udp dport $TPROXY_PORT drop
+
+  # --- UDP через TPROXY (прозрачный UDP-сокет meow) ---
+  fw_run nft add rule inet tproxy_ci prerouting \
     iifname \""$FIRST_IFACE"\" \
-    meta l4proto { tcp, udp } \
+    meta l4proto udp \
     meta mark set $TPROXY_MARK \
-    tproxy ip to 127.0.0.1:$TPROXY_PORT \
+    tproxy ip to $TPROXY_IP:$TPROXY_PORT \
     accept
 
-  # --- policy routing ---
-  ip rule add fwmark $TPROXY_MARK lookup $TPROXY_TABLE pref 100
-  ip route replace local 0.0.0.0/0 dev lo table $TPROXY_TABLE proto static scope host
+  # --- policy routing для UDP (пакет доставляется локально) ---
+  ip rule add fwmark $TPROXY_MARK lookup $TPROXY_TABLE pref 100 2>/dev/null || true
+  ip route replace local 0.0.0.0/0 dev lo table $TPROXY_TABLE proto static scope host 2>/dev/null || true
 
-  # если ядро без IPv6 — просто пропускаем
-  [ -f /proc/net/if_inet6 ] || return 0
+  # --- TCP через nat DNAT (SO_ORIGINAL_DST) ---
+  fw_run nft add table ip tproxy_nat
+  fw_run nft "add chain ip tproxy_nat prerouting {
+    type nat hook prerouting priority dstnat;
+    policy accept;
+  }"
+  fw_run nft add rule ip tproxy_nat prerouting fib daddr type local return
+  fw_run nft add rule ip tproxy_nat prerouting \
+    iifname \""$FIRST_IFACE"\" \
+    meta l4proto tcp \
+    dnat to $TPROXY_IP:$TPROXY_PORT
+}
 
-  # --- TPROXY IPv6 ---
-  nft add rule inet tproxy_ci prerouting \
-      iifname \""$FIRST_IFACE"\" \
-      meta l4proto { tcp, udp } \
-      meta mark set $TPROXY_MARK \
-      tproxy ip6 to [::1]:$TPROXY_PORT \
-      accept
+# правила iptables для настройки tproxy (когда в ядре нет nf_tables)
+iptables_rules() {
+  # --- nat: TCP через DNAT (SO_ORIGINAL_DST) ---
+  iptables -t nat -N MEOW_PREROUTING 2>/dev/null || iptables -t nat -F MEOW_PREROUTING
+  iptables_skip_local nat MEOW_PREROUTING
+  fw_run iptables -t nat -A MEOW_PREROUTING -i "$FIRST_IFACE" -p tcp -j DNAT --to-destination "$TPROXY_IP:$TPROXY_PORT"
+  iptables -t nat -C PREROUTING -j MEOW_PREROUTING 2>/dev/null || iptables -t nat -I PREROUTING 1 -j MEOW_PREROUTING
 
-  # --- policy routing IPv6 ---
-  ip -6 rule add fwmark $TPROXY_MARK lookup $TPROXY_TABLE pref 100
-  ip -6 route replace local ::/0 dev lo table $TPROXY_TABLE
+  # --- mangle: UDP через TPROXY (прозрачный UDP-сокет meow) ---
+  iptables -t mangle -N MEOW_PREROUTING 2>/dev/null || iptables -t mangle -F MEOW_PREROUTING
+  iptables_skip_local mangle MEOW_PREROUTING
+  # UDP прямо на порт слушателя — это бесконечный цикл «прокси → сам себя»
+  fw_run iptables -t mangle -A MEOW_PREROUTING -p udp -d "$TPROXY_IP" --dport "$TPROXY_PORT" -j DROP
+  fw_run iptables -t mangle -A MEOW_PREROUTING -i "$FIRST_IFACE" -p udp -j TPROXY --on-ip "$TPROXY_IP" --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK"
+  iptables -t mangle -C PREROUTING -j MEOW_PREROUTING 2>/dev/null || iptables -t mangle -I PREROUTING 1 -j MEOW_PREROUTING
+
+  # --- policy routing для UDP (пакет доставляется локально) ---
+  ip rule add fwmark "$TPROXY_MARK" lookup "$TPROXY_TABLE" pref 100 2>/dev/null || true
+  ip route replace local 0.0.0.0/0 dev lo table "$TPROXY_TABLE" proto static scope host 2>/dev/null || true
 }
 
 # если это шаблон, выполняем преднастройки
 if [ "${ENVSUBST:-1}" -eq 1 ]; then
   # AUTO CONFIG tun-in
 if grep -Eq '^[[:space:]]*\$TUN_IN_AUTOCONFIG' "$CONFIG_FILE"; then
-  if [ "${TUN:-0}" -eq 1 ] || [ $NFT_CORE -eq 0 ]; then
+  if [ "${TUN:-0}" -eq 1 ]; then
   # meow-rs описывает TUN отдельной секцией верхнего уровня `tun:` (docs/tun.md),
   # а НЕ элементом listeners: - type: tun (такой тип слушателя — жёсткая ошибка).
   # Блок подставляется на колонке 0: он закрывает секцию listeners: и открывает
@@ -492,7 +586,9 @@ if grep -Eq '^[[:space:]]*\$TUN_IN_AUTOCONFIG' "$CONFIG_FILE"; then
   # auto-route: true — полный перехват: свой трафик контейнера уходит в
   # устройство через policy rules, а транзитный (форвард с роутера)
   # остаётся в главной таблице, откуда в устройство попадает, как и раньше,
-  # только fake-ip диапазон.
+  # только fake-ip диапазон. Auto-redirect (перехват транзитного трафика
+  # правилами iptables/nft) в meow-rs не реализован, поэтому TUN-режим
+  # перехватывает только fake-ip диапазон — это режим по запросу (TUN=1).
   # Имя входа TUN для правил IN-NAME в meow-rs всегда "meow-tun".
   TUN_IN_AUTOCONFIG=$(cat <<EOF
 tun:
@@ -505,13 +601,22 @@ tun:
 EOF
 )
 else
-  nft_rules
+  # Прозрачный перехват (tproxy) — одинаков для обоих бэкендов файрвола,
+  # различаются только сами правила: nft_rules / iptables_rules.
+  if [ "$FW" = "nft" ]; then
+    nft_rules
+  else
+    iptables_rules
+  fi
   # tproxy-слушатель: в meow-rs udp: true допустим только вместе с
   # firewall: false — ядро само не ставит правила для UDP TPROXY
-  # (маршрутизацию UDP обеспечивают nft-правила выше). Вход называется "tun-in".
+  # (маршрутизацию UDP обеспечивают правила выше). Вход называется "tun-in".
+  # listen — адрес контейнера на входящем интерфейсе: nat DNAT перенаправляет
+  # пакет именно на него, и сокет на 127.0.0.1 такой поток не примет.
   TUN_IN_AUTOCONFIG=$(cat <<EOF
   - name: tun-in
     type: tproxy
+    listen: $TPROXY_IP
     port: $TPROXY_PORT
     udp: true
     firewall: false

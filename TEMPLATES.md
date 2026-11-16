@@ -655,6 +655,8 @@ SG_COUNTRIES="JP,SG,KR,IN"
 
 > ⚠️ **meow-rs:** TUN оформляется секцией верхнего уровня `tun:` (не listener `type: tun`): `entrypoint.sh` генерирует `enable`/`device: tun-in`/`auto-route`/`dns-hijack` автоматически. Из полей mihomo в образе meowkrotik подставляются `TUN_AUTO_ROUTE` и `TUN_INET4_ADDRESS`, а `TUN_STACK`, `TUN_AUTO_DETECT_INTERFACE`, `TUN_AUTO_REDIRECT`, `TUN_INET6_ADDRESS` и `TUN_DISABLE_ICMP_FORWARDING` остались неиспользуемыми: ядро принимает их с предупреждением и игнорирует; в правилах `IN-NAME` TUN-вход называется `meow-tun`, tproxy-прослушиватель — `tun-in` (шаблоны уже учитывают оба имени). TUN требует DNS-режим fake-ip (по умолчанию) и работает от root — подробнее: [docs/tun.md](https://github.com/meow-rs/meow-rs/blob/main/docs/tun.md).
 
+> ℹ️ **Прозрачный перехват в tproxy-режиме (обычный):** блок `$TUN_IN_AUTOCONFIG` подставляет запись `listeners: - name: tun-in / type: tproxy` с `udp: true` и `firewall: false` — ядро само правила перехвата не ставит, их собирает `entrypoint.sh`: TCP через nat DNAT, UDP через mangle TPROXY (nftables, если в ядре есть модуль `nf_tables`, иначе iptables). Слушатель привязан к адресу контейнера на входящем интерфейсе: перенаправленный поток на сокете `127.0.0.1` не принимается. IPv6-трафик перехватом не охвачен.
+
 **Переменные шаблона Area (только stargate-area.sh):**
 
 | Переменная       | Описание                                                                    | Значение по умолчанию |
